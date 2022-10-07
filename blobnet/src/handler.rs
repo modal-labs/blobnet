@@ -33,7 +33,11 @@ fn parse_range_header(s: &HeaderValue) -> Option<(u64, u64)> {
 const E500: StatusCode = StatusCode::INTERNAL_SERVER_ERROR;
 
 /// Reads the range-inclusive data from a file with the given hash.
-fn read_data(config: &Config, hash: &str, range: Option<(u64, u64)>) -> Result<Body, StatusCode> {
+fn read_data(
+    config: &Config,
+    hash: &str,
+    range: Option<(u64, u64)>,
+) -> Result<Response<Body>, StatusCode> {
     /// Loads a file, populating it from the NFS if not locally present.
     fn load_file(config: &Config, hash: &str) -> Result<File, StatusCode> {
         let suffix = hash_path(hash).expect("load_file called with invalid hash");
@@ -50,10 +54,10 @@ fn read_data(config: &Config, hash: &str, range: Option<(u64, u64)>) -> Result<B
     }
 
     let mut file = load_file(config, hash)?;
+    let len = file.metadata().map_err(|_| E500)?.len();
 
     let limit = if let Some((start, end)) = range {
         // Validate the range is within the file.
-        let len = file.metadata().map_err(|_| E500)?.len();
         if start > end || end > len {
             return Err(StatusCode::RANGE_NOT_SATISFIABLE);
         }
@@ -65,7 +69,13 @@ fn read_data(config: &Config, hash: &str, range: Option<(u64, u64)>) -> Result<B
     };
 
     let reader = tokio::fs::File::from_std(file).take(limit);
-    Ok(chunked_body(reader))
+    let response = Response::builder()
+        .header("X-Bn-File-Length", len.to_string())
+        .status(StatusCode::OK)
+        .body(chunked_body(reader))
+        .map_err(|_| E500)?;
+
+    Ok(response)
 }
 
 /// Main service handler for the file server.
@@ -79,10 +89,9 @@ pub async fn handle(config: Arc<Config>, req: Request<Body>) -> Result<Response<
         (&Method::GET, path) => {
             let range = req.headers().get("x-bn-range").and_then(parse_range_header);
             let hash = String::from(get_hash(path)?);
-            let body = task::spawn_blocking(move || read_data(&config, &hash, range))
+            task::spawn_blocking(move || read_data(&config, &hash, range))
                 .await
-                .map_err(|_| E500)??;
-            Ok(Response::new(body))
+                .map_err(|_| E500)?
         }
         (&Method::PUT, "/") => {
             // Spawn a blocking task to write the file.
