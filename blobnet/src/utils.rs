@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{anyhow, ensure, Result};
 use hyper::{Body, StatusCode};
@@ -21,16 +21,23 @@ pub(crate) fn get_hash(path: &str) -> Result<&str, StatusCode> {
     }
 }
 
-/// Obtain a file content path from a hexadecimal SHA-256 hash.
-pub(crate) fn hash_path(hash: &str) -> Result<PathBuf> {
-    ensure!(is_hash(hash), "received an invalid SHA-256 hash");
+/// Checks if a hash is valid and returns and error if not.
+pub(crate) fn check_hash(hash: &str) -> Result<()> {
+    ensure!(is_hash(hash), "received an invalid SHA-256 hash: {hash}");
+    Ok(())
+}
 
-    Ok(PathBuf::from_iter([
+/// Obtain a file content path from a hexadecimal SHA-256 hash.
+pub(crate) fn hash_path(hash: &str) -> Result<String> {
+    check_hash(hash)?;
+
+    Ok(format!(
+        "{}/{}/{}/{}",
         &hash[0..2],
         &hash[2..4],
         &hash[4..6],
         &hash[6..],
-    ]))
+    ))
 }
 
 /// Copies a file to a destination location, atomically, without clobbering any
@@ -73,7 +80,7 @@ pub(crate) fn atomic_copy(source: impl AsRef<Path>, dest: impl AsRef<Path>) -> R
 }
 
 /// Streams a body by reading from a source in buffered chunks (64 KB).
-pub fn chunked_body(mut source: impl AsyncRead + Unpin + Send + 'static) -> Body {
+pub(crate) fn chunked_body(mut source: impl AsyncRead + Unpin + Send + 'static) -> Body {
     let (mut sender, body) = Body::channel();
     tokio::spawn(async move {
         loop {
@@ -91,8 +98,6 @@ pub fn chunked_body(mut source: impl AsyncRead + Unpin + Send + 'static) -> Body
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use anyhow::Result;
 
     use super::hash_path;
@@ -101,7 +106,7 @@ mod tests {
     fn test_hash_path() -> Result<()> {
         assert_eq!(
             hash_path("f2252f951decf449ea1b5e773a7750650ac01cd159a5fc8e04e56dbf2c06e091")?,
-            Path::new("f2/25/2f/951decf449ea1b5e773a7750650ac01cd159a5fc8e04e56dbf2c06e091"),
+            "f2/25/2f/951decf449ea1b5e773a7750650ac01cd159a5fc8e04e56dbf2c06e091",
         );
         assert!(hash_path(&"a".repeat(64)).is_ok());
         assert!(hash_path(&"A".repeat(64)).is_err());

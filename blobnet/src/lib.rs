@@ -4,27 +4,91 @@
 //! can add binary blobs to the cache, and the data is indexed by its SHA-256
 //! hash. Any blob can be retrieved by its hash and range of bytes to read.
 //!
-//! Data stored in this server is locally cached, backed by NFS, and durable.
+//! Data stored in blobnet is locally cached and durable.
+
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 use std::convert::Infallible;
 use std::future::{self, Future};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, ensure, Result};
-use hyper::body::Bytes;
-use hyper::client::HttpConnector;
+use anyhow::Result;
 pub use hyper::server::conn::AddrIncoming;
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Client, Request, Response, Server, StatusCode};
-use named_retry::Retry;
+use hyper::{Body, Response, Server};
+use thiserror::Error;
 use tokio::{fs, time};
 
 use crate::handler::handle;
+use crate::provider::Provider;
 
+pub mod client;
 mod handler;
-pub mod utils;
+pub mod provider;
+mod utils;
+
+/// Error type for results returned from blobnet.
+#[derive(Error, Debug)]
+pub enum BlobnetError {
+    /// The requested file was not found.
+    #[error("file not found")]
+    NotFound,
+
+    /// The requested range was not satisfiable.
+    #[error("range not satisfiable")]
+    BadRange,
+
+    /// An error in network or filesystem communication occurred.
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
+
+    /// An operational error occurred in blobnet.
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
+#[derive(Default)]
+pub struct BlobnetBuilder {
+    providers: Vec<Box<dyn Provider>>,
+    cache: Option<(PathBuf, u64)>,
+}
+
+impl BlobnetBuilder {
+    pub fn provider(&mut self, provider: impl Provider + 'static) -> &mut Self {
+        self.providers.push(Box::new(provider));
+        self
+    }
+
+    pub fn cache(&mut self, path: impl AsRef<Path>, size: u64) -> &mut Self {
+        self.cache = Some((path.as_ref().into(), size));
+        self
+    }
+
+    pub async fn build(self) -> Result<Blobnet> {
+        let cache = match self.cache {
+            Some((path, size)) => Some(Cache::new(path, size).await?),
+            None => None,
+        };
+        Ok(Blobnet {
+            providers: self.providers,
+            cache,
+        })
+    }
+}
+
+pub struct Blobnet {
+    providers: Vec<Box<dyn Provider>>,
+    cache: Cache,
+}
+
+impl Blobnet {
+    pub fn builder() -> BlobnetBuilder {
+        Default::default()
+    }
+}
 
 /// Configuration for the file server.
 #[derive(Debug, Clone)]
@@ -101,107 +165,5 @@ pub async fn cleaner(config: Config) {
                 fs::remove_dir_all(&subfolder_tmp).await.ok();
             }
         }
-    }
-}
-
-/// An asynchronous client for the file server.
-#[derive(Clone)]
-pub struct FileClient {
-    client: Client<HttpConnector>,
-    origin: String,
-    secret: String,
-    retry: Retry,
-}
-
-impl FileClient {
-    /// Create a new file client object pointing at a given HTTP origin.
-    pub fn new(origin: &str, secret: &str) -> Self {
-        let mut connector = HttpConnector::new();
-        connector.set_nodelay(true);
-        FileClient {
-            client: Client::builder().build(connector),
-            origin: origin.into(),
-            secret: secret.into(),
-            retry: Retry::new("blobnet-file-client")
-                .attempts(4)
-                .base_delay(Duration::from_millis(50))
-                .delay_factor(2.0),
-        }
-    }
-
-    /// Send an HTTP request, retrying on server errors.
-    ///
-    /// This retry operation fixes rare transient disconnects of a few
-    /// milliseconds when the blobnet server is terminated, due to a restart. It
-    /// also retries if the body stream is canceled or closed abnormally.
-    async fn request_with_retry<Fut>(
-        &self,
-        make_req: impl Fn() -> Fut,
-    ) -> Result<(StatusCode, Bytes)>
-    where
-        Fut: Future<Output = Result<Request<Body>>>,
-    {
-        self.retry
-            .run(|| async {
-                let resp = self.client.request(make_req().await?).await?;
-                let status = resp.status();
-                ensure!(!status.is_server_error(), "server error: {status}");
-                let bytes = hyper::body::to_bytes(resp.into_body()).await?;
-                Ok((status, bytes))
-            })
-            .await
-    }
-
-    /// Check if a file is present in the server.
-    pub async fn has(&self, hash: &str) -> Result<bool> {
-        let make_req = || async {
-            Ok(Request::builder()
-                .method("GET")
-                .uri(&format!("{}/{}", self.origin, hash))
-                .header("X-Bn-Secret", &self.secret)
-                .header("X-Bn-Range", "0-0")
-                .body(Body::empty())?)
-        };
-        let (status, _) = self.request_with_retry(make_req).await?;
-        match status {
-            status if status.is_success() => Ok(true),
-            StatusCode::NOT_FOUND => Ok(false),
-            status => bail!("has request failed: {status}"),
-        }
-    }
-
-    /// Read a range of bytes from a file.
-    pub async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes> {
-        let make_req = || async {
-            let mut req = Request::builder()
-                .method("GET")
-                .uri(&format!("{}/{}", self.origin, hash))
-                .header("X-Bn-Secret", &self.secret);
-            if let Some((start, end)) = range {
-                req = req.header("X-Bn-Range", format!("{}-{}", start, end));
-            }
-            Ok(req.body(Body::empty())?)
-        };
-        let (status, bytes) = self.request_with_retry(make_req).await?;
-        ensure!(status.is_success(), "get request failed: {status}");
-        Ok(bytes)
-    }
-
-    /// Put a stream of data to the server, returning the hash ID if successful.
-    pub async fn put<Fut, B>(&self, data: impl Fn() -> Fut) -> Result<String>
-    where
-        Fut: Future<Output = Result<B>>,
-        B: Into<Body>,
-    {
-        let make_req = || async {
-            Ok(Request::builder()
-                .method("PUT")
-                .uri(&self.origin)
-                .header("X-Bn-Secret", &self.secret)
-                .body(data().await?.into())?)
-        };
-        let (status, bytes) = self.request_with_retry(make_req).await?;
-        ensure!(status.is_success(), "put request failed: {status}");
-        Ok(std::str::from_utf8(&bytes)?.into())
     }
 }

@@ -13,11 +13,17 @@ edition = "2021"
 
 [dependencies]
 anyhow = { version = "1.0.56", features = ["backtrace"] }
+async-trait = "0.1.58"
+aws-config = "0.49.0"
+aws-sdk-s3 = "0.19.0"
+aws-types = "0.49.0"
 clap = { version = "3.1.6", features = ["derive", "env"] }
 fastrand = "1.8.0"
 hyper = { version = "0.14.18", features = ["full"] }
 named-retry = { path = "../named-retry", version = "0.2.0" }
+parking_lot = "0.12.1"
 sha2 = "0.10.2"
 shutdown = "0.2.1"
 tempfile = "3.3.0"
+thiserror = "1.0.37"
 tokio = { version = "1.17.0", features = ["full"] }
