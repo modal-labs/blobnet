@@ -18,7 +18,7 @@ use tokio::task;
 use crate::{
     client::FileClient,
     utils::{chunked_body, hash_path},
-    BlobnetError,
+    Error,
 };
 
 /// Specifies a storage backend for the blobnet service.
@@ -29,16 +29,16 @@ use crate::{
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Check if a file exists and returns its size in bytes.
-    async fn head(&self, hash: &str) -> Result<u64, BlobnetError>;
+    async fn head(&self, hash: &str) -> Result<u64, Error>;
 
     /// Returns the data from the file at the given path.
-    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, BlobnetError>;
+    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, Error>;
 
     /// Adds a binary blob to storage, returning its hash.
     ///
     /// This function is not as latency-sensitive as the others, caring more
     /// about throughput. It may take two passes over the data.
-    async fn put(&self, data: Box<dyn AsyncRead + Send + Unpin>) -> Result<String, BlobnetError>;
+    async fn put(&self, data: Box<dyn AsyncRead + Send + Unpin>) -> Result<String, Error>;
 }
 
 /// A provider that stores blobs in memory, only for debugging.
@@ -56,31 +56,28 @@ impl Memory {
 
 #[async_trait]
 impl Provider for Memory {
-    async fn head(&self, hash: &str) -> Result<u64, BlobnetError> {
+    async fn head(&self, hash: &str) -> Result<u64, Error> {
         let data = self.data.read();
-        let bytes = data.get(hash).ok_or(BlobnetError::NotFound)?;
+        let bytes = data.get(hash).ok_or(Error::NotFound)?;
         Ok(bytes.len() as u64)
     }
 
-    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, BlobnetError> {
+    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, Error> {
         let data = self.data.read();
         let mut bytes = match data.get(hash) {
             Some(bytes) => bytes.clone(),
-            None => return Err(BlobnetError::NotFound),
+            None => return Err(Error::NotFound),
         };
         if let Some((start, end)) = range {
             if start > end || end > bytes.len() as u64 {
-                return Err(BlobnetError::BadRange);
+                return Err(Error::BadRange);
             }
             bytes = bytes.slice(start as usize..end as usize);
         }
         Ok(bytes)
     }
 
-    async fn put(
-        &self,
-        mut data: Box<dyn AsyncRead + Send + Unpin>,
-    ) -> Result<String, BlobnetError> {
+    async fn put(&self, mut data: Box<dyn AsyncRead + Send + Unpin>) -> Result<String, Error> {
         let mut buf = Vec::new();
         data.read_to_end(&mut buf)
             .await
@@ -115,7 +112,7 @@ impl S3 {
 
 #[async_trait]
 impl Provider for S3 {
-    async fn head(&self, hash: &str) -> Result<u64, BlobnetError> {
+    async fn head(&self, hash: &str) -> Result<u64, Error> {
         let key = hash_path(hash)?;
         let result = self
             .client
@@ -130,13 +127,13 @@ impl Provider for S3 {
             Err(SdkError::ServiceError { err, .. })
                 if matches!(err.kind, HeadObjectErrorKind::NotFound(_)) =>
             {
-                Err(BlobnetError::NotFound)
+                Err(Error::NotFound)
             }
-            Err(err) => Err(BlobnetError::Internal(err.into())),
+            Err(err) => Err(Error::Internal(err.into())),
         }
     }
 
-    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, BlobnetError> {
+    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, Error> {
         check_range(range)?;
         let key = hash_path(hash)?;
         let result = self
@@ -156,13 +153,13 @@ impl Provider for S3 {
             Err(SdkError::ServiceError { err, .. })
                 if matches!(err.kind, GetObjectErrorKind::NoSuchKey(_)) =>
             {
-                Err(BlobnetError::NotFound)
+                Err(Error::NotFound)
             }
-            Err(err) => Err(BlobnetError::Internal(err.into())),
+            Err(err) => Err(Error::Internal(err.into())),
         }
     }
 
-    async fn put(&self, data: Box<dyn AsyncRead + Send + Unpin>) -> Result<String, BlobnetError> {
+    async fn put(&self, data: Box<dyn AsyncRead + Send + Unpin>) -> Result<String, Error> {
         let (hash, file) = make_data_tempfile(data).await?;
         let body = ByteStream::read_from()
             .file(file)
@@ -187,15 +184,15 @@ pub struct NFS;
 
 #[async_trait]
 impl Provider for NFS {
-    async fn head(&self, hash: &str) -> Result<u64, BlobnetError> {
+    async fn head(&self, hash: &str) -> Result<u64, Error> {
         todo!()
     }
 
-    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, BlobnetError> {
+    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, Error> {
         todo!()
     }
 
-    async fn put(&self, data: Box<dyn AsyncRead + Send + Unpin>) -> Result<String, BlobnetError> {
+    async fn put(&self, data: Box<dyn AsyncRead + Send + Unpin>) -> Result<String, Error> {
         todo!()
     }
 }
@@ -214,15 +211,15 @@ impl<C> Remote<C> {
 
 #[async_trait]
 impl<C: Connect + Clone + Send + Sync + 'static> Provider for Remote<C> {
-    async fn head(&self, hash: &str) -> Result<u64, BlobnetError> {
+    async fn head(&self, hash: &str) -> Result<u64, Error> {
         self.client.head(hash).await
     }
 
-    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, BlobnetError> {
+    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, Error> {
         self.client.get(hash, range).await
     }
 
-    async fn put(&self, data: Box<dyn AsyncRead + Send + Unpin>) -> Result<String, BlobnetError> {
+    async fn put(&self, data: Box<dyn AsyncRead + Send + Unpin>) -> Result<String, Error> {
         let (hash, file) = make_data_tempfile(data).await?;
         self.client
             .put(|| async { Ok(chunked_body(file.try_clone().await?)) })
@@ -256,7 +253,7 @@ async fn make_data_tempfile(
     Ok((hash, file))
 }
 
-fn check_range(range: Option<(u64, u64)>) -> Result<(), BlobnetError> {
+fn check_range(range: Option<(u64, u64)>) -> Result<(), Error> {
     if let Some((start, end)) = range {
         if start >= end {
             return Err(anyhow!("invalid range: start >= end").into());

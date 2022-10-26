@@ -12,7 +12,7 @@ use named_retry::Retry;
 
 #[cfg(doc)]
 use crate::provider::Remote;
-use crate::BlobnetError;
+use crate::Error;
 
 /// An asynchronous client for the file server.
 ///
@@ -52,7 +52,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
     async fn request_with_retry<Fut>(
         &self,
         make_req: impl Fn() -> Fut,
-    ) -> Result<(HeaderMap, Bytes), BlobnetError>
+    ) -> Result<(HeaderMap, Bytes), Error>
     where
         Fut: Future<Output = anyhow::Result<Request<Body>>>,
     {
@@ -75,14 +75,14 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
 
         match status {
             status if status.is_success() => Ok((headers, bytes)),
-            StatusCode::NOT_FOUND => Err(BlobnetError::NotFound),
-            StatusCode::RANGE_NOT_SATISFIABLE => Err(BlobnetError::BadRange),
+            StatusCode::NOT_FOUND => Err(Error::NotFound),
+            StatusCode::RANGE_NOT_SATISFIABLE => Err(Error::BadRange),
             status => Err(anyhow!("blobnet request failed: {status}").into()),
         }
     }
 
     /// Check if a file is present in the server and return its size.
-    pub async fn head(&self, hash: &str) -> Result<u64, BlobnetError> {
+    pub async fn head(&self, hash: &str) -> Result<u64, Error> {
         let make_req = || async {
             Ok(Request::builder()
                 .method("HEAD")
@@ -102,7 +102,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
     }
 
     /// Read a range of bytes from a file.
-    pub async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, BlobnetError> {
+    pub async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, Error> {
         let make_req = || async {
             let mut req = Request::builder()
                 .method("GET")
@@ -118,7 +118,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
     }
 
     /// Put a stream of data to the server, returning the hash ID if successful.
-    pub async fn put<Fut, B>(&self, data: impl Fn() -> Fut) -> Result<String, BlobnetError>
+    pub async fn put<Fut, B>(&self, data: impl Fn() -> Fut) -> Result<String, Error>
     where
         Fut: Future<Output = anyhow::Result<B>>,
         B: Into<Body>,

@@ -32,7 +32,7 @@ mod utils;
 
 /// Error type for results returned from blobnet.
 #[derive(Error, Debug)]
-pub enum BlobnetError {
+pub enum Error {
     /// The requested file was not found.
     #[error("file not found")]
     NotFound,
