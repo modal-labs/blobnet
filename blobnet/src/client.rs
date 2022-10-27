@@ -5,11 +5,11 @@ use std::io;
 use std::time::Duration;
 
 use anyhow::{anyhow, ensure, Context};
-use hyper::body::HttpBody;
 use hyper::client::{connect::Connect, HttpConnector};
 use hyper::{Body, Client, HeaderMap, Request, StatusCode};
 use named_retry::Retry;
-use tokio::io::AsyncWriteExt;
+use tokio_stream::StreamExt;
+use tokio_util::io::StreamReader;
 
 #[cfg(doc)]
 use crate::provider::Remote;
@@ -114,16 +114,11 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
             }
             Ok(req.body(Body::empty())?)
         };
-        let (_, mut body) = self.request_with_retry(make_req).await?;
-        let (mut tx, rx) = tokio::io::duplex(8192);
-        tokio::spawn(async move {
-            while let Some(result) = body.data().await {
-                let bytes = result.map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
-                tx.write_all(&bytes).await?;
-            }
-            anyhow::Ok(())
-        });
-        Ok(Box::new(rx))
+        let (_, body) = self.request_with_retry(make_req).await?;
+        let reader = StreamReader::new(StreamExt::map(body, |result| {
+            result.map_err(|err| io::Error::new(io::ErrorKind::Other, err))
+        }));
+        Ok(Box::pin(reader))
     }
 
     /// Put a stream of data to the server, returning the hash ID if successful.

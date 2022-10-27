@@ -14,7 +14,7 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio::task;
 
-use crate::utils::{atomic_copy, chunked_body, get_hash, hash_path};
+use crate::utils::{chunked_body, get_hash, hash_path};
 use crate::Config;
 
 /// The maximum size of a single file that can be stored (16 GB).
@@ -45,7 +45,7 @@ fn read_data(
         if !path.exists() {
             let nfs_path = config.nfs_path.join(&suffix);
             if nfs_path.exists() {
-                atomic_copy(&nfs_path, &path).map_err(|_| E500)?;
+                // atomic_copy(&nfs_path, &path).map_err(|_| E500)?;
             } else {
                 return Err(StatusCode::NOT_FOUND);
             }
@@ -121,7 +121,7 @@ pub async fn handle(config: Arc<Config>, req: Request<Body>) -> Result<Response<
                 let nfs_path = config.nfs_path.join(&suffix);
                 let storage_path = config.storage_path.join(&suffix);
                 fs::create_dir_all(nfs_path.parent().context("nfs path has no parent")?)?;
-                atomic_copy(file.path(), &nfs_path)?;
+                // atomic_copy(file.path(), &nfs_path)?;
 
                 // This copy populates the local cache with the newly uploaded file. It is OK if
                 // this operation fails, since the ultimate source of truth is in NFS.

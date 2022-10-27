@@ -11,9 +11,10 @@
 
 use std::convert::Infallible;
 use std::future::{self, Future};
+use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 pub use hyper::server::conn::AddrIncoming;
@@ -32,7 +33,7 @@ pub mod provider;
 mod utils;
 
 /// A stream of bytes from some data source.
-pub type ReadStream = Box<dyn AsyncRead + Send + Unpin>;
+pub type ReadStream = Pin<Box<dyn AsyncRead + Send>>;
 
 /// Error type for results returned from blobnet.
 #[derive(Error, Debug)]
@@ -47,50 +48,19 @@ pub enum Error {
 
     /// An error in network or filesystem communication occurred.
     #[error(transparent)]
-    IO(#[from] std::io::Error),
+    IO(#[from] io::Error),
 
     /// An operational error occurred in blobnet.
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
 
-#[derive(Default)]
-pub struct BlobnetBuilder {
-    providers: Vec<Box<dyn Provider>>,
-    cache: Option<(PathBuf, u64)>,
-}
-
-impl BlobnetBuilder {
-    pub fn provider(&mut self, provider: impl Provider + 'static) -> &mut Self {
-        self.providers.push(Box::new(provider));
-        self
-    }
-
-    pub fn cache(&mut self, path: impl AsRef<Path>, size: u64) -> &mut Self {
-        self.cache = Some((path.as_ref().into(), size));
-        self
-    }
-
-    pub async fn build(self) -> Result<Blobnet> {
-        let cache = match self.cache {
-            Some((path, size)) => Some(Cache::new(path, size).await?),
-            None => None,
-        };
-        Ok(Blobnet {
-            providers: self.providers,
-            cache,
-        })
-    }
-}
-
-pub struct Blobnet {
-    providers: Vec<Box<dyn Provider>>,
-    cache: Cache,
-}
-
-impl Blobnet {
-    pub fn builder() -> BlobnetBuilder {
-        Default::default()
+impl From<Error> for io::Error {
+    fn from(err: Error) -> Self {
+        match err {
+            Error::IO(err) => err,
+            _ => io::Error::new(io::ErrorKind::Other, err),
+        }
     }
 }
 
@@ -144,30 +114,4 @@ pub async fn listen_with_shutdown(
         .serve(make_svc)
         .with_graceful_shutdown(shutdown)
         .await
-}
-
-/// A background process that periodically cleans the cache directory.
-///
-/// Since the cache directory is limited in size but local to the machine, it is
-/// acceptable to delete files from this folder at any time. Therefore, we can
-/// simply remove 1/(256^2) of all files at an interval of 60 seconds.
-///
-/// Doing the math, it would take (256^2) / 60 / 24 = ~46 days on average to
-/// expire any given file from the disk cache directory.
-pub async fn cleaner(config: Config) {
-    const CLEAN_INTERVAL: Duration = Duration::from_secs(30);
-    loop {
-        time::sleep(CLEAN_INTERVAL).await;
-        let prefix = fastrand::u16(..);
-        let (d1, d2) = (prefix / 256, prefix % 256);
-        let subfolder = config.storage_path.join(&format!("{d1:x}/{d2:x}"));
-        if fs::metadata(&subfolder).await.is_ok() {
-            println!("cleaning cache directory: {}", subfolder.display());
-            let subfolder_tmp = config.storage_path.join(&format!("{d1:x}/.tmp-{d2:x}"));
-            fs::remove_dir_all(&subfolder_tmp).await.ok();
-            if fs::rename(&subfolder, &subfolder_tmp).await.is_ok() {
-                fs::remove_dir_all(&subfolder_tmp).await.ok();
-            }
-        }
-    }
 }
