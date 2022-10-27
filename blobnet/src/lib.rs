@@ -20,6 +20,7 @@ pub use hyper::server::conn::AddrIncoming;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Response, Server};
 use thiserror::Error;
+use tokio::io::AsyncRead;
 use tokio::{fs, time};
 
 use crate::handler::handle;
@@ -29,6 +30,9 @@ pub mod client;
 mod handler;
 pub mod provider;
 mod utils;
+
+/// A stream of bytes from some data source.
+pub type ReadStream = Box<dyn AsyncRead + Send + Unpin>;
 
 /// Error type for results returned from blobnet.
 #[derive(Error, Debug)]

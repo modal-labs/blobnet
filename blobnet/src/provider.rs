@@ -1,6 +1,8 @@
 //! A ground-truth storage provider for asynchronous file access.
 
-use std::{collections::HashMap, io::SeekFrom};
+use std::collections::HashMap;
+use std::io::{self, Cursor, SeekFrom};
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
@@ -11,13 +13,13 @@ use aws_sdk_s3::{
 use hyper::{body::Bytes, client::connect::Connect};
 use sha2::{Digest, Sha256};
 use tempfile::tempfile;
-use tokio::fs::File;
+use tokio::fs::{self, File};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tokio::task;
 
 use crate::client::FileClient;
 use crate::utils::{chunked_body, hash_path};
-use crate::Error;
+use crate::{Error, ReadStream};
 
 /// Specifies a storage backend for the blobnet service.
 ///
@@ -30,13 +32,13 @@ pub trait Provider: Send + Sync {
     async fn head(&self, hash: &str) -> Result<u64, Error>;
 
     /// Returns the data from the file at the given path.
-    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, Error>;
+    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error>;
 
     /// Adds a binary blob to storage, returning its hash.
     ///
     /// This function is not as latency-sensitive as the others, caring more
     /// about throughput. It may take two passes over the data.
-    async fn put(&self, data: Box<dyn AsyncRead + Send + Unpin>) -> Result<String, Error>;
+    async fn put(&self, data: ReadStream) -> Result<String, Error>;
 }
 
 /// A provider that stores blobs in memory, only for debugging.
@@ -60,7 +62,7 @@ impl Provider for Memory {
         Ok(bytes.len() as u64)
     }
 
-    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, Error> {
+    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
         let data = self.data.read();
         let mut bytes = match data.get(hash) {
             Some(bytes) => bytes.clone(),
@@ -72,7 +74,7 @@ impl Provider for Memory {
             }
             bytes = bytes.slice(start as usize..end as usize);
         }
-        Ok(bytes)
+        Ok(Box::new(Cursor::new(bytes)))
     }
 
     async fn put(&self, mut data: Box<dyn AsyncRead + Send + Unpin>) -> Result<String, Error> {
@@ -129,7 +131,7 @@ impl Provider for S3 {
         }
     }
 
-    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, Error> {
+    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
         check_range(range)?;
         let key = hash_path(hash)?;
         let result = self
@@ -142,10 +144,7 @@ impl Provider for S3 {
             .await;
 
         match result {
-            Ok(resp) => {
-                let result = resp.body.collect().await;
-                Ok(result.map_err(anyhow::Error::from)?.into_bytes())
-            }
+            Ok(resp) => Ok(Box::new(resp.body.into_async_read())),
             Err(SdkError::ServiceError { err, .. })
                 if matches!(err.kind, GetObjectErrorKind::NoSuchKey(_)) =>
             {
@@ -175,17 +174,55 @@ impl Provider for S3 {
     }
 }
 
-/// A provider that stores blobs in a local, NFS-mounted directory.
-pub struct NFS;
+/// A provider that stores blobs in a local directory.
+///
+/// This is especially useful when targeting network file systems mounts.
+pub struct LocalDir {
+    dir: PathBuf,
+}
+
+impl LocalDir {
+    /// Creates a new local directory provider.
+    pub async fn new(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        fs::create_dir_all(&path).await?;
+        Ok(Self {
+            dir: path.as_ref().to_owned(),
+        })
+    }
+}
 
 #[async_trait]
-impl Provider for NFS {
+impl Provider for LocalDir {
     async fn head(&self, hash: &str) -> Result<u64, Error> {
-        todo!()
+        let key = hash_path(hash)?;
+        let path = self.dir.join(key);
+        match fs::metadata(&path).await {
+            Ok(metadata) => Ok(metadata.len()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Err(Error::NotFound),
+            Err(err) => Err(err.into()),
+        }
     }
 
-    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, Error> {
-        todo!()
+    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
+        check_range(range)?;
+        let key = hash_path(hash)?;
+        let path = self.dir.join(key);
+        let mut file = match File::open(&path).await {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Err(Error::NotFound),
+            Err(err) => return Err(err.into()),
+        };
+        if let Some((start, end)) = range {
+            let len = file.metadata().await?.len();
+            if end > len {
+                Err(Error::BadRange)
+            } else {
+                file.seek(SeekFrom::Start(start)).await?;
+                Ok(Box::new(file.take(end - start)))
+            }
+        } else {
+            Ok(Box::new(file))
+        }
     }
 
     async fn put(&self, data: Box<dyn AsyncRead + Send + Unpin>) -> Result<String, Error> {
@@ -211,7 +248,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> Provider for Remote<C> {
         self.client.head(hash).await
     }
 
-    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, Error> {
+    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
         self.client.get(hash, range).await
     }
 

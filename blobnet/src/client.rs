@@ -1,18 +1,19 @@
 //! This module defines an HTTP client for the blobnet file server.
 
 use std::future::Future;
+use std::io;
 use std::time::Duration;
 
 use anyhow::{anyhow, ensure, Context};
-use hyper::body::Bytes;
-use hyper::client::connect::Connect;
-use hyper::client::HttpConnector;
+use hyper::body::HttpBody;
+use hyper::client::{connect::Connect, HttpConnector};
 use hyper::{Body, Client, HeaderMap, Request, StatusCode};
 use named_retry::Retry;
+use tokio::io::AsyncWriteExt;
 
 #[cfg(doc)]
 use crate::provider::Remote;
-use crate::Error;
+use crate::{Error, ReadStream};
 
 /// An asynchronous client for the file server.
 ///
@@ -52,7 +53,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
     async fn request_with_retry<Fut>(
         &self,
         make_req: impl Fn() -> Fut,
-    ) -> Result<(HeaderMap, Bytes), Error>
+    ) -> Result<(HeaderMap, Body), Error>
     where
         Fut: Future<Output = anyhow::Result<Request<Body>>>,
     {
@@ -61,20 +62,20 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
             .base_delay(Duration::from_millis(50))
             .delay_factor(2.0);
 
-        let (status, headers, bytes) = HTTP_RETRY
+        let (status, headers, body) = HTTP_RETRY
             .run(|| async {
                 let resp = self.client.request(make_req().await?).await?;
                 let status = resp.status();
 
                 ensure!(!status.is_server_error(), "server error: {status}");
                 let headers = resp.headers().clone();
-                let bytes = hyper::body::to_bytes(resp.into_body()).await?;
-                Ok((status, headers, bytes))
+                let body = resp.into_body();
+                Ok((status, headers, body))
             })
             .await?;
 
         match status {
-            status if status.is_success() => Ok((headers, bytes)),
+            status if status.is_success() => Ok((headers, body)),
             StatusCode::NOT_FOUND => Err(Error::NotFound),
             StatusCode::RANGE_NOT_SATISFIABLE => Err(Error::BadRange),
             status => Err(anyhow!("blobnet request failed: {status}").into()),
@@ -102,7 +103,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
     }
 
     /// Read a range of bytes from a file.
-    pub async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<Bytes, Error> {
+    pub async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
         let make_req = || async {
             let mut req = Request::builder()
                 .method("GET")
@@ -113,8 +114,16 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
             }
             Ok(req.body(Body::empty())?)
         };
-        let (_, bytes) = self.request_with_retry(make_req).await?;
-        Ok(bytes)
+        let (_, mut body) = self.request_with_retry(make_req).await?;
+        let (mut tx, rx) = tokio::io::duplex(8192);
+        tokio::spawn(async move {
+            while let Some(result) = body.data().await {
+                let bytes = result.map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+                tx.write_all(&bytes).await?;
+            }
+            anyhow::Ok(())
+        });
+        Ok(Box::new(rx))
     }
 
     /// Put a stream of data to the server, returning the hash ID if successful.
@@ -130,7 +139,10 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
                 .header("X-Bn-Secret", &self.secret)
                 .body(data().await?.into())?)
         };
-        let (_, bytes) = self.request_with_retry(make_req).await?;
+        let (_, body) = self.request_with_retry(make_req).await?;
+        let bytes = hyper::body::to_bytes(body)
+            .await
+            .map_err(anyhow::Error::from)?;
         Ok(std::str::from_utf8(&bytes)
             .map_err(anyhow::Error::from)?
             .into())
