@@ -9,31 +9,36 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::convert::Infallible;
-use std::future::{self, Future};
 use std::io;
-use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
 
-use anyhow::Result;
-pub use hyper::server::conn::AddrIncoming;
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Response, Server};
+use hyper::StatusCode;
 use thiserror::Error;
-use tokio::io::AsyncRead;
-use tokio::{fs, time};
-
-use crate::handler::handle;
-use crate::provider::Provider;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 pub mod client;
-mod handler;
 pub mod provider;
+pub mod server;
 mod utils;
+
+#[allow(clippy::declare_interior_mutable_const)]
+mod headers {
+    use hyper::header::HeaderName;
+
+    pub const HEADER_SECRET: HeaderName = HeaderName::from_static("x-blobnet-secret");
+    pub const HEADER_RANGE: HeaderName = HeaderName::from_static("x-blobnet-range");
+    pub const HEADER_FILE_LENGTH: HeaderName = HeaderName::from_static("x-blobnet-file-length");
+}
 
 /// A stream of bytes from some data source.
 pub type ReadStream = Pin<Box<dyn AsyncRead + Send>>;
+
+/// Helper function to collect a [`ReadStream`] into a byte vector.
+pub async fn read_to_vec(mut stream: ReadStream) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).await?;
+    Ok(buf)
+}
 
 /// Error type for results returned from blobnet.
 #[derive(Error, Debug)]
@@ -64,54 +69,13 @@ impl From<Error> for io::Error {
     }
 }
 
-/// Configuration for the file server.
-#[derive(Debug, Clone)]
-pub struct Config {
-    /// Path to the local disk storage.
-    pub storage_path: PathBuf,
-
-    /// Path to the network file system mount.
-    pub nfs_path: PathBuf,
-
-    /// Secret used to authorize users to access the service.
-    pub secret: String,
-}
-
-/// Create a file server listening at the given address.
-pub async fn listen(config: Config, incoming: AddrIncoming) -> Result<(), hyper::Error> {
-    listen_with_shutdown(config, incoming, future::pending()).await
-}
-
-/// Create a file server listening at the given address, with graceful shutdown.
-pub async fn listen_with_shutdown(
-    config: Config,
-    incoming: AddrIncoming,
-    shutdown: impl Future<Output = ()>,
-) -> Result<(), hyper::Error> {
-    let config = Arc::new(config);
-
-    // Low-level service boilerplate to interface with the [`hyper`] API.
-    let make_svc = make_service_fn(move |_conn| {
-        let config = Arc::clone(&config);
-        async {
-            Ok::<_, Infallible>(service_fn(move |req| {
-                let config = Arc::clone(&config);
-                async {
-                    let resp = handle(config, req).await;
-                    Ok::<_, Infallible>(resp.unwrap_or_else(|code| {
-                        Response::builder()
-                            .status(code)
-                            .body(Body::empty())
-                            .unwrap()
-                    }))
-                }
-            }))
+impl From<Error> for StatusCode {
+    fn from(err: Error) -> Self {
+        match err {
+            Error::NotFound => StatusCode::NOT_FOUND,
+            Error::BadRange => StatusCode::RANGE_NOT_SATISFIABLE,
+            Error::IO(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
-    });
-
-    Server::builder(incoming)
-        .tcp_nodelay(true)
-        .serve(make_svc)
-        .with_graceful_shutdown(shutdown)
-        .await
+    }
 }

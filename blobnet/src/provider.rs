@@ -29,7 +29,7 @@ use tokio_util::io::StreamReader;
 
 use crate::client::FileClient;
 use crate::utils::{atomic_copy, chunked_body, hash_path};
-use crate::{Error, ReadStream};
+use crate::{read_to_vec, Error, ReadStream};
 
 /// Specifies a storage backend for the blobnet service.
 ///
@@ -55,7 +55,7 @@ pub trait Provider: Send + Sync {
     async fn put(&self, data: ReadStream) -> Result<String, Error>;
 }
 
-/// A provider that stores blobs in memory, only for debugging.
+/// A provider that stores blobs in memory, only used for testing.
 #[derive(Default)]
 pub struct Memory {
     data: parking_lot::RwLock<HashMap<String, Bytes>>,
@@ -199,11 +199,10 @@ pub struct LocalDir {
 
 impl LocalDir {
     /// Creates a new local directory provider.
-    pub async fn new(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        fs::create_dir_all(&path).await?;
-        Ok(Self {
+    pub fn new(path: impl AsRef<Path>) -> Self {
+        Self {
             dir: path.as_ref().to_owned(),
-        })
+        }
     }
 }
 
@@ -401,17 +400,16 @@ impl<P> Cached<P> {
     ///
     /// Set the page size in bytes for cached chunks, as well as the directory
     /// where fragments should be stored.
-    pub async fn new(inner: P, dir: impl AsRef<Path>, pagesize: u64) -> anyhow::Result<Self> {
-        fs::create_dir_all(&dir).await?;
+    pub fn new(inner: P, dir: impl AsRef<Path>, pagesize: u64) -> Self {
         assert!(pagesize >= 4096, "pagesize must be at least 4096");
-        Ok(Self {
+        Self {
             state: Arc::new(CachedState {
                 inner,
                 page_cache: Default::default(),
                 dir: dir.as_ref().to_owned(), // File system cache
                 pagesize,
             }),
-        })
+        }
     }
 
     /// A background process that periodically cleans the cache directory.
@@ -448,12 +446,7 @@ impl<P> CachedState<P> {
     /// The first cache page of each hash stores HEAD metadata. After that,
     /// index `n` stores the byte range from `(n - 1) * pagesize` to `n *
     /// pagesize`.
-    async fn with_cache<F, Out>(
-        self: Arc<Self>,
-        hash: String,
-        n: u32,
-        func: F,
-    ) -> Result<Bytes, Error>
+    async fn with_cache<F, Out>(&self, hash: String, n: u32, func: F) -> Result<Bytes, Error>
     where
         F: FnOnce() -> Out,
         Out: Future<Output = Result<Bytes, Error>>,
@@ -485,7 +478,8 @@ impl<P> CachedState<P> {
 #[async_trait]
 impl<P: Provider + 'static> Provider for Cached<P> {
     async fn head(&self, hash: &str) -> Result<u64, Error> {
-        let size = Arc::clone(&self.state)
+        let size = self
+            .state
             .with_cache(hash.into(), 0, || async {
                 let size = self.state.inner.head(hash).await?;
                 Ok(Bytes::from_iter(size.to_le_bytes()))
@@ -497,13 +491,16 @@ impl<P: Provider + 'static> Provider for Cached<P> {
     }
 
     async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
+        let len = self.head(hash).await?;
         let (start, end) = match range {
             Some(range) => range,
-            None => (0, self.head(hash).await?),
+            None => (0, len),
         };
-
         if let Some(res) = check_range(range)? {
             return Ok(res);
+        }
+        if end > len {
+            return Err(Error::BadRange);
         }
 
         let chunk_begin: u32 = (1 + start / self.state.pagesize)
@@ -520,18 +517,27 @@ impl<P: Provider + 'static> Provider for Cached<P> {
         let stream = tokio_stream::iter(chunk_begin..=chunk_end).then(move |chunk| {
             let state = Arc::clone(&state);
             let hash = hash.clone();
-            Arc::clone(&state).with_cache(hash.clone(), chunk, move || async move {
-                let start = (chunk as u64 - 1) * state.pagesize;
-                let end = chunk as u64 * state.pagesize;
-                let mut buf = Vec::new();
-                state
-                    .inner
-                    .get(&hash, Some((start, end)))
-                    .await?
-                    .read_to_end(&mut buf)
+            let lo = (chunk as u64 - 1) * state.pagesize;
+            let hi = (chunk as u64 * state.pagesize).min(len);
+            async move {
+                let mut bytes = Arc::clone(&state)
+                    .with_cache(hash.clone(), chunk, move || async move {
+                        Ok(read_to_vec(state.inner.get(&hash, Some((lo, hi))).await?)
+                            .await?
+                            .into())
+                    })
                     .await?;
-                Ok(buf.into())
-            })
+
+                // Trim off possible extra bytes from the beginning and end of the page
+                // size-aligned range.
+                if start > lo {
+                    bytes = bytes.slice((start - lo) as usize..);
+                }
+                if hi > end {
+                    bytes = bytes.slice(0..bytes.len() - (hi - end) as usize);
+                }
+                Ok::<_, Error>(bytes)
+            }
         });
         Ok(Box::pin(StreamReader::new(stream)))
     }

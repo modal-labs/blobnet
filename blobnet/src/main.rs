@@ -2,22 +2,21 @@ use std::net::{Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
 use anyhow::{ensure, Context, Result};
-use blobnet::Config;
+use blobnet::server::Config;
 use clap::Parser;
 use hyper::server::conn::AddrIncoming;
 use shutdown::Shutdown;
 use tokio::process::Command;
 
-/// Low-latency file server that is backed by a non-volatile cache.
+/// Low-latency, content-addressed file server with a non-volatile cache.
 ///
-/// This file server uses two directories on disk: an NFS mount, which is a
-/// durable but slower store for files, and a local storage directory, which
-/// acts as a non-volatile cache. Both directories must be writable by the user
-/// runnning this server.
+/// This file server can be configured to use one of multiple provider. Library
+/// use is more flexible. For the command-line interface, it can read from an S3
+/// bucket or local NFS-mounted directory, optionally with a fallback provider.
+/// It also optionally takes a path to a cache directory.
 ///
-/// Files are keyed by their content hashes. At any given time, all files must
-/// be present in their corresopnding locations in the NFS directory, but they
-/// might not be present in the local storage directory.
+/// Files are keyed by their content hashes, and the cache is meant to be
+/// considered volatile at all times.
 #[derive(Parser, Debug)]
 #[clap(version, about, long_about = None)]
 pub struct Cli {
@@ -61,16 +60,16 @@ async fn main() -> Result<()> {
         );
     }
 
-    let config = Config {
-        storage_path: args.storage_path,
-        nfs_path: args.nfs_path,
-        secret: args.secret,
-    };
-    let addr = SocketAddr::from((Ipv6Addr::UNSPECIFIED, args.port));
-    let incoming = AddrIncoming::bind(&addr).context("failed to listen on address")?;
-    println!("listening on http://{addr}");
-    let mut shutdown = Shutdown::new()?;
-    tokio::spawn(blobnet::cleaner(config.clone()));
-    blobnet::listen_with_shutdown(config, incoming, shutdown.recv()).await?;
+    // let config = Config {
+    //     storage_path: args.storage_path,
+    //     nfs_path: args.nfs_path,
+    //     secret: args.secret,
+    // };
+    // let addr = SocketAddr::from((Ipv6Addr::UNSPECIFIED, args.port));
+    // let incoming = AddrIncoming::bind(&addr).context("failed to listen on
+    // address")?; println!("listening on http://{addr}");
+    // let mut shutdown = Shutdown::new()?;
+    // tokio::spawn(blobnet::cleaner(config.clone()));
+    // blobnet::listen_with_shutdown(config, incoming, shutdown.recv()).await?;
     Ok(())
 }

@@ -1,18 +1,17 @@
-//! This module defines an HTTP client for the blobnet file server.
+//! Basic HTTP client for the blobnet file server.
 
 use std::future::Future;
-use std::io;
 use std::time::Duration;
 
 use anyhow::{anyhow, ensure, Context};
 use hyper::client::{connect::Connect, HttpConnector};
 use hyper::{Body, Client, HeaderMap, Request, StatusCode};
 use named_retry::Retry;
-use tokio_stream::StreamExt;
-use tokio_util::io::StreamReader;
 
+use crate::headers::{HEADER_FILE_LENGTH, HEADER_RANGE, HEADER_SECRET};
 #[cfg(doc)]
 use crate::provider::Remote;
+use crate::utils::body_stream;
 use crate::{Error, ReadStream};
 
 /// An asynchronous client for the file server.
@@ -88,12 +87,12 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
             Ok(Request::builder()
                 .method("HEAD")
                 .uri(&format!("{}/{}", self.origin, hash))
-                .header("X-Bn-Secret", &self.secret)
+                .header(HEADER_SECRET, &self.secret)
                 .body(Body::empty())?)
         };
         let (headers, _) = self.request_with_retry(make_req).await?;
         let len: u64 = headers
-            .get("x-bn-file-length")
+            .get(HEADER_FILE_LENGTH)
             .context("missing file length header")?
             .to_str()
             .map_err(anyhow::Error::from)?
@@ -108,17 +107,14 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
             let mut req = Request::builder()
                 .method("GET")
                 .uri(&format!("{}/{}", self.origin, hash))
-                .header("X-Bn-Secret", &self.secret);
+                .header(HEADER_SECRET, &self.secret);
             if let Some((start, end)) = range {
-                req = req.header("X-Bn-Range", format!("{}-{}", start, end));
+                req = req.header(HEADER_RANGE, format!("{}-{}", start, end));
             }
             Ok(req.body(Body::empty())?)
         };
         let (_, body) = self.request_with_retry(make_req).await?;
-        let reader = StreamReader::new(StreamExt::map(body, |result| {
-            result.map_err(|err| io::Error::new(io::ErrorKind::Other, err))
-        }));
-        Ok(Box::pin(reader))
+        Ok(body_stream(body))
     }
 
     /// Put a stream of data to the server, returning the hash ID if successful.
@@ -131,7 +127,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
             Ok(Request::builder()
                 .method("PUT")
                 .uri(&self.origin)
-                .header("X-Bn-Secret", &self.secret)
+                .header(HEADER_SECRET, &self.secret)
                 .body(data().await?.into())?)
         };
         let (_, body) = self.request_with_retry(make_req).await?;

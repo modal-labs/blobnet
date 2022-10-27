@@ -1,13 +1,17 @@
 //! File system and hash utilities used by the file server.
 
-use std::fs;
 use std::io::{ErrorKind, Read};
 use std::path::Path;
+use std::{fs, io};
 
 use anyhow::{anyhow, ensure, Result};
 use hyper::{Body, StatusCode};
 use tempfile::NamedTempFile;
 use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio_stream::StreamExt;
+use tokio_util::io::StreamReader;
+
+use crate::ReadStream;
 
 fn is_hash(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
@@ -94,6 +98,13 @@ pub(crate) fn chunked_body(mut source: impl AsyncRead + Unpin + Send + 'static) 
         anyhow::Ok(())
     });
     body
+}
+
+/// Convert an HTTP body into a [`ReadStream`] object.
+pub(crate) fn body_stream(body: Body) -> ReadStream {
+    Box::pin(StreamReader::new(StreamExt::map(body, |result| {
+        result.map_err(|err| io::Error::new(io::ErrorKind::Other, err))
+    })))
 }
 
 #[cfg(test)]

@@ -15,7 +15,8 @@
 use std::{env, time::Instant};
 
 use anyhow::Result;
-use blobnet::FileClient;
+use blobnet::{client::FileClient, read_to_vec};
+use hyper::client::HttpConnector;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,16 +28,18 @@ async fn main() -> Result<()> {
 
     let data = str::repeat("abcdefghijklmnop", 4096); // 64 KiB
 
-    let client = FileClient::new(origin, secret);
+    let mut connector = HttpConnector::new();
+    connector.set_nodelay(true);
+    let client = FileClient::new(connector, origin, secret);
     let hash = client.put(|| async { Ok(data.clone()) }).await?;
 
-    let output = client.get(&hash, None).await?;
+    let output = read_to_vec(client.get(&hash, None).await?).await?;
     println!("read {} bytes", output.len());
 
     let mut times = vec![];
     for _ in 0..10000 {
         let start = Instant::now();
-        let output2 = client.get(&hash, None).await?;
+        let output2 = read_to_vec(client.get(&hash, None).await?).await?;
         times.push(start.elapsed().as_micros());
         assert!(output2.len() == output.len());
     }
