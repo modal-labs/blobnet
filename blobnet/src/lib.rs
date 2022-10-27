@@ -25,9 +25,9 @@ mod utils;
 mod headers {
     use hyper::header::HeaderName;
 
-    pub const HEADER_SECRET: HeaderName = HeaderName::from_static("x-blobnet-secret");
-    pub const HEADER_RANGE: HeaderName = HeaderName::from_static("x-blobnet-range");
-    pub const HEADER_FILE_LENGTH: HeaderName = HeaderName::from_static("x-blobnet-file-length");
+    pub const HEADER_SECRET: HeaderName = HeaderName::from_static("x-bn-secret");
+    pub const HEADER_RANGE: HeaderName = HeaderName::from_static("x-bn-range");
+    pub const HEADER_FILE_LENGTH: HeaderName = HeaderName::from_static("x-bn-file-length");
 }
 
 /// A stream of bytes from some data source.
