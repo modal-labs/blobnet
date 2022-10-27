@@ -15,11 +15,9 @@ use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tokio::task;
 
-use crate::{
-    client::FileClient,
-    utils::{chunked_body, hash_path},
-    Error,
-};
+use crate::client::FileClient;
+use crate::utils::{chunked_body, hash_path};
+use crate::Error;
 
 /// Specifies a storage backend for the blobnet service.
 ///
@@ -79,9 +77,7 @@ impl Provider for Memory {
 
     async fn put(&self, mut data: Box<dyn AsyncRead + Send + Unpin>) -> Result<String, Error> {
         let mut buf = Vec::new();
-        data.read_to_end(&mut buf)
-            .await
-            .map_err(anyhow::Error::from)?;
+        data.read_to_end(&mut buf).await?;
         let hash = format!("{:x}", Sha256::new().chain_update(&buf).finalize());
         self.data.write().insert(hash.clone(), Bytes::from(buf));
         Ok(hash)
@@ -231,11 +227,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> Provider for Remote<C> {
 async fn make_data_tempfile(
     data: Box<dyn AsyncRead + Send + Unpin>,
 ) -> anyhow::Result<(String, File)> {
-    let mut file = File::from_std(
-        task::spawn_blocking(tempfile)
-            .await
-            .map_err(anyhow::Error::from)??,
-    );
+    let mut file = File::from_std(task::spawn_blocking(tempfile).await??);
     let mut hash = Sha256::new();
     let mut reader = BufReader::new(data);
     loop {
