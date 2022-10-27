@@ -14,11 +14,11 @@ use hyper::{body::Bytes, client::connect::Connect};
 use sha2::{Digest, Sha256};
 use tempfile::tempfile;
 use tokio::fs::{self, File};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tokio::task;
 
 use crate::client::FileClient;
-use crate::utils::{chunked_body, hash_path};
+use crate::utils::{atomic_copy, chunked_body, hash_path};
 use crate::{Error, ReadStream};
 
 /// Specifies a storage backend for the blobnet service.
@@ -77,7 +77,7 @@ impl Provider for Memory {
         Ok(Box::new(Cursor::new(bytes)))
     }
 
-    async fn put(&self, mut data: Box<dyn AsyncRead + Send + Unpin>) -> Result<String, Error> {
+    async fn put(&self, mut data: ReadStream) -> Result<String, Error> {
         let mut buf = Vec::new();
         data.read_to_end(&mut buf).await?;
         let hash = format!("{:x}", Sha256::new().chain_update(&buf).finalize());
@@ -154,7 +154,7 @@ impl Provider for S3 {
         }
     }
 
-    async fn put(&self, data: Box<dyn AsyncRead + Send + Unpin>) -> Result<String, Error> {
+    async fn put(&self, data: ReadStream) -> Result<String, Error> {
         let (hash, file) = make_data_tempfile(data).await?;
         let body = ByteStream::read_from()
             .file(file)
@@ -225,8 +225,15 @@ impl Provider for LocalDir {
         }
     }
 
-    async fn put(&self, data: Box<dyn AsyncRead + Send + Unpin>) -> Result<String, Error> {
-        todo!()
+    async fn put(&self, data: ReadStream) -> Result<String, Error> {
+        let (hash, file) = make_data_tempfile(data).await?;
+        let file = file.into_std().await;
+        let key = hash_path(&hash)?;
+        let path = self.dir.join(key);
+        task::spawn_blocking(move || atomic_copy(file, path))
+            .await
+            .map_err(anyhow::Error::from)??;
+        Ok(hash)
     }
 }
 
@@ -252,7 +259,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> Provider for Remote<C> {
         self.client.get(hash, range).await
     }
 
-    async fn put(&self, data: Box<dyn AsyncRead + Send + Unpin>) -> Result<String, Error> {
+    async fn put(&self, data: ReadStream) -> Result<String, Error> {
         let (hash, file) = make_data_tempfile(data).await?;
         self.client
             .put(|| async { Ok(chunked_body(file.try_clone().await?)) })
@@ -261,9 +268,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> Provider for Remote<C> {
 }
 
 /// Stream data from a source into a temporary file and compute the hash.
-async fn make_data_tempfile(
-    data: Box<dyn AsyncRead + Send + Unpin>,
-) -> anyhow::Result<(String, File)> {
+async fn make_data_tempfile(data: ReadStream) -> anyhow::Result<(String, File)> {
     let mut file = File::from_std(task::spawn_blocking(tempfile).await??);
     let mut hash = Sha256::new();
     let mut reader = BufReader::new(data);

@@ -1,6 +1,6 @@
 //! File system and hash utilities used by the file server.
 
-use std::fs;
+use std::fs::{self, File};
 use std::io::ErrorKind;
 use std::path::Path;
 
@@ -52,7 +52,7 @@ pub(crate) fn hash_path(hash: &str) -> Result<String> {
 ///
 /// Returns `true` if the file was not previously present at the destination and
 /// was written successfully.
-pub(crate) fn atomic_copy(source: impl AsRef<Path>, dest: impl AsRef<Path>) -> Result<bool> {
+pub(crate) fn atomic_copy(source: File, dest: impl AsRef<Path>) -> Result<bool> {
     let dest = dest.as_ref();
 
     if fs::metadata(&dest).is_err() {
@@ -63,7 +63,7 @@ pub(crate) fn atomic_copy(source: impl AsRef<Path>, dest: impl AsRef<Path>) -> R
 
         fs::create_dir_all(&parent)?;
         let file = NamedTempFile::new_in(parent)?;
-        fs::copy(&source, file.path())?;
+        std::io::copy(&mut source, &mut file)?;
 
         if let Err(err) = file.persist_noclobber(&dest) {
             // Ignore error if another caller created the file in the meantime.
