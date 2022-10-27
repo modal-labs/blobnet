@@ -92,7 +92,6 @@ async fn handle(config: Arc<Config>, req: Request<Body>) -> Result<Response<Body
         }
         (&Method::GET, path) => {
             let range = req.headers().get(HEADER_RANGE).and_then(parse_range_header);
-            println!("server range header: {:?}", range);
             let hash = get_hash(path)?;
             let reader = config.provider.get(hash, range).await?;
             Ok(Response::new(chunked_body(reader)))

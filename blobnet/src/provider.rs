@@ -290,14 +290,16 @@ async fn make_data_tempfile(data: ReadStream) -> anyhow::Result<(String, File)> 
     let mut hash = Sha256::new();
     let mut reader = BufReader::new(data);
     loop {
-        reader.fill_buf().await?;
-        let buf = reader.buffer();
-        if buf.is_empty() {
-            break;
-        }
-        hash.update(buf);
-        file.write_all(buf).await?;
-        reader.consume(buf.len());
+        let size = {
+            let buf = reader.fill_buf().await?;
+            if buf.is_empty() {
+                break;
+            }
+            hash.update(buf);
+            file.write_all(buf).await?;
+            buf.len()
+        };
+        reader.consume(size);
     }
     let hash = format!("{:x}", hash.finalize());
     file.seek(SeekFrom::Start(0)).await?;
@@ -395,7 +397,7 @@ struct CachedState<P> {
     pagesize: u64,
 }
 
-impl<P> Cached<P> {
+impl<P: 'static> Cached<P> {
     /// Create a new cache wrapper for the given provider.
     ///
     /// Set the page size in bytes for cached chunks, as well as the directory
@@ -421,22 +423,9 @@ impl<P> Cached<P> {
     ///
     /// Doing the math, it would take (256^2) / 60 / 24 = ~46 days on average to
     /// expire any given file from the disk cache directory.
-    pub async fn cleaner(&self) {
-        const CLEAN_INTERVAL: Duration = Duration::from_secs(30);
-        loop {
-            time::sleep(CLEAN_INTERVAL).await;
-            let prefix = fastrand::u16(..);
-            let (d1, d2) = (prefix / 256, prefix % 256);
-            let subfolder = self.state.dir.join(&format!("{d1:x}/{d2:x}"));
-            if fs::metadata(&subfolder).await.is_ok() {
-                println!("cleaning cache directory: {}", subfolder.display());
-                let subfolder_tmp = self.state.dir.join(&format!("{d1:x}/.tmp-{d2:x}"));
-                fs::remove_dir_all(&subfolder_tmp).await.ok();
-                if fs::rename(&subfolder, &subfolder_tmp).await.is_ok() {
-                    fs::remove_dir_all(&subfolder_tmp).await.ok();
-                }
-            }
-        }
+    pub fn cleaner(&self) -> impl Future<Output = ()> {
+        let state = Arc::clone(&self.state);
+        async move { state.cleaner().await }
     }
 }
 
@@ -472,6 +461,24 @@ impl<P> CachedState<P> {
             .map_err(anyhow::Error::from)??;
         self.page_cache.lock().insert(hash, n, bytes.clone());
         Ok(bytes)
+    }
+
+    async fn cleaner(&self) {
+        const CLEAN_INTERVAL: Duration = Duration::from_secs(30);
+        loop {
+            time::sleep(CLEAN_INTERVAL).await;
+            let prefix = fastrand::u16(..);
+            let (d1, d2) = (prefix / 256, prefix % 256);
+            let subfolder = self.dir.join(&format!("{d1:x}/{d2:x}"));
+            if fs::metadata(&subfolder).await.is_ok() {
+                println!("cleaning cache directory: {}", subfolder.display());
+                let subfolder_tmp = self.dir.join(&format!("{d1:x}/.tmp-{d2:x}"));
+                fs::remove_dir_all(&subfolder_tmp).await.ok();
+                if fs::rename(&subfolder, &subfolder_tmp).await.is_ok() {
+                    fs::remove_dir_all(&subfolder_tmp).await.ok();
+                }
+            }
+        }
     }
 }
 

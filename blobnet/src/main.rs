@@ -1,12 +1,13 @@
 use std::net::{Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
-use anyhow::{ensure, Context, Result};
-use blobnet::server::Config;
+use anyhow::{bail, Context, Result};
+use blobnet::provider::{self, Provider};
+use blobnet::server::{self, Config};
 use clap::Parser;
 use hyper::server::conn::AddrIncoming;
+use hyperlocal::SocketIncoming;
 use shutdown::Shutdown;
-use tokio::process::Command;
 
 /// Low-latency, content-addressed file server with a non-volatile cache.
 ///
@@ -20,56 +21,82 @@ use tokio::process::Command;
 #[derive(Parser, Debug)]
 #[clap(version, about, long_about = None)]
 pub struct Cli {
-    /// Path to the local disk storage.
-    #[clap(short, long, parse(from_os_str))]
-    pub storage_path: PathBuf,
+    /// String representation of the data provider.
+    #[clap(short, long)]
+    pub source: String,
 
-    /// Path to the network file system mount.
-    #[clap(short, long, parse(from_os_str))]
-    pub nfs_path: PathBuf,
+    /// Fallback provider if data is not found in `source`.
+    #[clap(short, long)]
+    pub fallback: Option<String>,
+
+    /// Cache directory for non-volatile local storage.
+    #[clap(short, long)]
+    pub cache: Option<PathBuf>,
 
     /// Secret used to authorize users to access the service.
     #[clap(long, env = "BLOBNET_SECRET")]
     pub secret: String,
 
-    /// Enable an additional check for the expected NFS device.
-    #[clap(long)]
-    pub expected_nfs: Option<String>,
-
-    /// HTTP port to listen on.
+    /// TCP port that the HTTP server listens on.
     #[clap(short, long, default_value_t = 7609)]
     pub port: u16,
+
+    /// Listen on a Unix domain socket instead of `port`.
+    #[clap(short, long)]
+    pub unix_socket: Option<PathBuf>,
+}
+
+/// Attempt to parse a provider from CLI argument.
+async fn parse_provider(source: &str) -> Result<Box<dyn Provider>> {
+    let (kind, arg) = source
+        .split_once(':')
+        .with_context(|| format!("source {source:?} has no ':' character"))?;
+    Ok(match kind {
+        "memory" => Box::new(provider::Memory::new()),
+        "s3" => {
+            let sdk_config = aws_config::load_from_env().await;
+            let s3 = aws_sdk_s3::Client::new(&sdk_config);
+            Box::new(provider::S3::new(s3, arg).await?)
+        }
+        "localdir" => Box::new(provider::LocalDir::new(arg)),
+        _ => bail!("unknown provider type {kind:?}"),
+    })
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Cli::parse();
 
-    if let Some(expected_nfs) = args.expected_nfs {
-        let output = Command::new("stat")
-            .args(["-f", "-c", "%T"])
-            .arg(&args.nfs_path)
-            .output()
-            .await
-            .context("failed to stat nfs path")?;
-        let fs_type = std::str::from_utf8(&output.stdout)?.trim();
-        ensure!(
-            fs_type == expected_nfs,
-            "expected imagefs root to be {}, but found {fs_type} instead",
-            expected_nfs,
-        );
+    let mut provider = parse_provider(&args.source).await?;
+
+    if let Some(fallback) = args.fallback {
+        let fallback = parse_provider(&fallback).await?;
+        provider = Box::new((provider, fallback));
     }
 
-    // let config = Config {
-    //     storage_path: args.storage_path,
-    //     nfs_path: args.nfs_path,
-    //     secret: args.secret,
-    // };
-    // let addr = SocketAddr::from((Ipv6Addr::UNSPECIFIED, args.port));
-    // let incoming = AddrIncoming::bind(&addr).context("failed to listen on
-    // address")?; println!("listening on http://{addr}");
-    // let mut shutdown = Shutdown::new()?;
-    // tokio::spawn(blobnet::cleaner(config.clone()));
-    // blobnet::listen_with_shutdown(config, incoming, shutdown.recv()).await?;
+    if let Some(cache) = args.cache {
+        // Server cache has 2 MiB page size.
+        let caching = provider::Cached::new(provider, cache, 1 << 21);
+        tokio::spawn(caching.cleaner());
+        provider = Box::new(caching);
+    }
+
+    let config = Config {
+        provider,
+        secret: args.secret,
+    };
+
+    if let Some(unix_socket) = args.unix_socket {
+        let incoming = SocketIncoming::bind(&unix_socket)
+            .with_context(|| format!("failed to bind to {unix_socket:?}"))?;
+        let mut shutdown = Shutdown::new()?;
+        server::listen_with_shutdown(config, incoming, shutdown.recv()).await?;
+    } else {
+        let addr = SocketAddr::from((Ipv6Addr::UNSPECIFIED, args.port));
+        let incoming = AddrIncoming::bind(&addr).context("failed to listen on address")?;
+        let mut shutdown = Shutdown::new()?;
+        server::listen_with_shutdown(config, incoming, shutdown.recv()).await?;
+    }
+
     Ok(())
 }
