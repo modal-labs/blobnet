@@ -364,6 +364,7 @@ impl PageCache {
         if self.mapping.insert_no_overwrite((hash, n), id).is_ok() {
             for (removed_id, _) in self.advisor.accessed_reuse_buffer(id, cost) {
                 self.mapping.remove_by_right(removed_id);
+                self.slab.remove(*removed_id as usize);
             }
         }
     }
@@ -375,6 +376,7 @@ impl PageCache {
         let cost = bytes.len() + 100;
         for (removed_id, _) in self.advisor.accessed_reuse_buffer(id, cost) {
             self.mapping.remove_by_right(removed_id);
+            self.slab.remove(*removed_id as usize);
         }
         Some(bytes)
     }
@@ -551,5 +553,24 @@ impl<P: Provider + 'static> Provider for Cached<P> {
 
     async fn put(&self, data: ReadStream) -> Result<String, Error> {
         self.state.inner.put(data).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hyper::body::Bytes;
+
+    use super::PageCache;
+
+    #[test]
+    fn page_cache_eviction() {
+        let mut cache = PageCache::default();
+        let bigpage = Bytes::from(vec![42; 1 << 21]);
+        for i in 0..4096 {
+            cache.insert(String::new(), i, bigpage.clone());
+        }
+        assert_eq!(cache.get(String::new(), 0), None);
+        assert_eq!(cache.get(String::new(), 4095), Some(bigpage));
+        assert!(cache.slab.len() < 2048);
     }
 }
