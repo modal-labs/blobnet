@@ -28,7 +28,7 @@ use tokio_stream::StreamExt;
 use tokio_util::io::StreamReader;
 
 use crate::client::FileClient;
-use crate::utils::{atomic_copy, chunked_body, hash_path};
+use crate::utils::{atomic_copy, hash_path, stream_body};
 use crate::{read_to_vec, Error, ReadStream};
 
 /// Specifies a storage backend for the blobnet service.
@@ -279,7 +279,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> Provider for Remote<C> {
     async fn put(&self, data: ReadStream) -> Result<String, Error> {
         let (_, file) = make_data_tempfile(data).await?;
         self.client
-            .put(|| async { Ok(chunked_body(file.try_clone().await?)) })
+            .put(|| async { Ok(stream_body(Box::pin(file.try_clone().await?))) })
             .await
     }
 }

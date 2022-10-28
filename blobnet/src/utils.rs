@@ -7,9 +7,8 @@ use std::{fs, io};
 use anyhow::{anyhow, ensure, Result};
 use hyper::{Body, StatusCode};
 use tempfile::NamedTempFile;
-use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_stream::StreamExt;
-use tokio_util::io::StreamReader;
+use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::ReadStream;
 
@@ -83,21 +82,9 @@ pub(crate) fn atomic_copy(mut source: impl Read, dest: impl AsRef<Path>) -> Resu
     }
 }
 
-/// Streams a body by reading from a source in buffered chunks (64 KB).
-pub(crate) fn chunked_body(mut source: impl AsyncRead + Unpin + Send + 'static) -> Body {
-    let (mut sender, body) = Body::channel();
-    tokio::spawn(async move {
-        loop {
-            let mut buf = Vec::with_capacity(65536);
-            if source.read_buf(&mut buf).await? != 0 {
-                sender.send_data(buf.into()).await?;
-            } else {
-                break;
-            }
-        }
-        anyhow::Ok(())
-    });
-    body
+/// Convert a [`ReadStream`] object into an HTTP body.
+pub(crate) fn stream_body(stream: ReadStream) -> Body {
+    Body::wrap_stream(ReaderStream::new(stream))
 }
 
 /// Convert an HTTP body into a [`ReadStream`] object.

@@ -13,7 +13,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::headers::{HEADER_FILE_LENGTH, HEADER_RANGE, HEADER_SECRET};
 use crate::provider::Provider;
-use crate::utils::{body_stream, chunked_body, get_hash};
+use crate::utils::{body_stream, get_hash, stream_body};
 
 /// Configuration for the file server.
 pub struct Config {
@@ -94,7 +94,7 @@ async fn handle(config: Arc<Config>, req: Request<Body>) -> Result<Response<Body
             let range = req.headers().get(HEADER_RANGE).and_then(parse_range_header);
             let hash = get_hash(path)?;
             let reader = config.provider.get(hash, range).await?;
-            Ok(Response::new(chunked_body(reader)))
+            Ok(Response::new(stream_body(reader)))
         }
         (&Method::PUT, "/") => {
             let body = req.into_body();
