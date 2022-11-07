@@ -47,6 +47,31 @@ async fn single_file() -> Result<()> {
 }
 
 #[tokio::test]
+async fn empty_file() -> Result<()> {
+    // This is an edge case in how empty files treat ranges.
+    let hsh = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    let origin = spawn_temp_server().await?;
+    let client = FileClient::new_http(&origin, "secret");
+
+    assert!(matches!(
+        client.get(hsh, None).await,
+        Err(blobnet::Error::NotFound),
+    ));
+
+    let hsh2 = client.put(|| async { Ok("") }).await?;
+    assert_eq!(hsh, hsh2);
+
+    assert_eq!(eat(client.get(hsh, None).await?).await?, "");
+    assert!(matches!(
+        client.get(hsh, Some((0, 1))).await,
+        Err(blobnet::Error::BadRange),
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn missing_file() -> Result<()> {
     let origin = spawn_temp_server().await?;
     let client = FileClient::new_http(&origin, "secret");

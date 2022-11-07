@@ -31,6 +31,10 @@ use crate::client::FileClient;
 use crate::utils::{atomic_copy, hash_path, stream_body};
 use crate::{read_to_vec, Error, ReadStream};
 
+/// The SHA-256 hash of the empty string. This handles an edge case.
+const SHA256_EMPTY_STRING: &str =
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
 /// Specifies a storage backend for the blobnet service.
 ///
 /// Each method returns an error only when some operational problem occurs, such
@@ -528,6 +532,16 @@ impl<P: Provider + 'static> Provider for Cached<P> {
     }
 
     async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
+        // Edge case: if the blob is empty, then we can't directly match a `None` range
+        // to the range `0..u64::MAX` because the latter should return an out-of-bounds
+        // error. This is the only case where this transformation fails semantically.
+        //
+        // To correct for this, we simply return an empty value in this case.
+        if hash == SHA256_EMPTY_STRING && range.is_none() {
+            self.state.get_cached_size(hash).await?; // Make sure the blob has been uploaded before.
+            return Ok(Box::pin(Cursor::new(Bytes::new())));
+        }
+
         let (start, end) = range.unwrap_or((0, u64::MAX));
         if let Some(res) = check_range(range)? {
             return Ok(res);
