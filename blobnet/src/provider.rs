@@ -558,9 +558,12 @@ impl<P: Provider + 'static> Provider for Cached<P> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use hyper::body::Bytes;
 
-    use super::PageCache;
+    use super::{Memory, PageCache, Provider};
+    use crate::Error;
 
     #[test]
     fn page_cache_eviction() {
@@ -572,5 +575,18 @@ mod tests {
         assert_eq!(cache.get(String::new(), 0), None);
         assert_eq!(cache.get(String::new(), 4095), Some(bigpage));
         assert!(cache.slab.len() < 2048);
+    }
+
+    #[tokio::test]
+    async fn fallback_provider() {
+        let p = (Memory::new(), Memory::new());
+        let hash = p
+            .put(Box::pin(Cursor::new(vec![42; 1 << 21])))
+            .await
+            .unwrap();
+
+        assert!(matches!(p.get(&hash, None).await, Ok(_)));
+        assert!(matches!(p.0.get(&hash, None).await, Ok(_)));
+        assert!(matches!(p.1.get(&hash, None).await, Err(Error::NotFound)));
     }
 }
