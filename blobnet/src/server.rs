@@ -14,6 +14,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::headers::{HEADER_FILE_LENGTH, HEADER_RANGE, HEADER_SECRET};
 use crate::provider::Provider;
 use crate::utils::{body_stream, get_hash, stream_body};
+use crate::{make_resp, Error};
 
 /// Configuration for the file server.
 pub struct Config {
@@ -55,12 +56,7 @@ where
                 let config = Arc::clone(&config);
                 async {
                     let resp = handle(config, req).await;
-                    Ok::<_, Infallible>(resp.unwrap_or_else(|code| {
-                        Response::builder()
-                            .status(code)
-                            .body(Body::empty())
-                            .unwrap()
-                    }))
+                    Ok::<_, Infallible>(resp.unwrap_or_else(|err_resp| err_resp))
                 }
             }))
         }
@@ -72,23 +68,23 @@ where
         .await
 }
 
-const E500: StatusCode = StatusCode::INTERNAL_SERVER_ERROR;
-
 /// Main service handler for the file server.
-async fn handle(config: Arc<Config>, req: Request<Body>) -> Result<Response<Body>, StatusCode> {
+async fn handle(config: Arc<Config>, req: Request<Body>) -> Result<Response<Body>, Response<Body>> {
     let secret = req.headers().get(HEADER_SECRET);
     let secret = secret.and_then(|s| s.to_str().ok());
 
     match (req.method(), req.uri().path()) {
-        (&Method::GET, "/") => Ok(Response::new(Body::from("blobnet ok\n"))),
-        _ if secret != Some(&config.secret) => Err(StatusCode::UNAUTHORIZED),
+        (&Method::GET, "/") => Ok(make_resp(StatusCode::OK, "blobnet ok")),
+        _ if secret != Some(&config.secret) => {
+            Err(make_resp(StatusCode::UNAUTHORIZED, "unauthorized"))
+        }
         (&Method::HEAD, path) => {
             let hash = get_hash(path)?;
             let len = config.provider.head(hash).await?;
             Response::builder()
                 .header(HEADER_FILE_LENGTH, len.to_string())
                 .body(Body::empty())
-                .map_err(|_| E500)
+                .map_err(|e| Error::Internal(e.into()).into())
         }
         (&Method::GET, path) => {
             let range = req.headers().get(HEADER_RANGE).and_then(parse_range_header);
@@ -101,7 +97,7 @@ async fn handle(config: Arc<Config>, req: Request<Body>) -> Result<Response<Body
             let hash = config.provider.put(body_stream(body)).await?;
             Ok(Response::new(Body::from(hash)))
         }
-        _ => Err(StatusCode::NOT_FOUND),
+        _ => Err(make_resp(StatusCode::NOT_FOUND, "path pattern not found")),
     }
 }
 

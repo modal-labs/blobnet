@@ -5,22 +5,22 @@ use std::path::Path;
 use std::{fs, io};
 
 use anyhow::{anyhow, ensure, Result};
-use hyper::{Body, StatusCode};
+use hyper::Body;
 use tempfile::NamedTempFile;
 use tokio_stream::StreamExt;
 use tokio_util::io::{ReaderStream, StreamReader};
 
-use crate::ReadStream;
+use crate::{Error, ReadStream};
 
 fn is_hash(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Extracts the hash from the path component of an HTTP request URL.
-pub(crate) fn get_hash(path: &str) -> Result<&str, StatusCode> {
+pub(crate) fn get_hash(path: &str) -> Result<&str, Error> {
     match path.strip_prefix('/') {
         Some(hash) if is_hash(hash) => Ok(hash),
-        _ => Err(StatusCode::NOT_FOUND),
+        _ => Err(Error::NotFound),
     }
 }
 

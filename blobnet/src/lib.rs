@@ -12,7 +12,7 @@
 use std::io;
 use std::pin::Pin;
 
-use hyper::StatusCode;
+use hyper::{Body, Response, StatusCode};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -73,13 +73,21 @@ impl From<Error> for io::Error {
     }
 }
 
-impl From<Error> for StatusCode {
+impl From<Error> for Response<Body> {
     fn from(err: Error) -> Self {
         match err {
-            Error::NotFound => StatusCode::NOT_FOUND,
-            Error::BadRange => StatusCode::RANGE_NOT_SATISFIABLE,
-            Error::IO(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Error::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Error::NotFound => make_resp(StatusCode::NOT_FOUND, err.to_string()),
+            Error::BadRange => make_resp(StatusCode::RANGE_NOT_SATISFIABLE, err.to_string()),
+            Error::IO(_) => make_resp(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+            Error::Internal(_) => make_resp(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
         }
     }
+}
+
+/// Helper function for making a simple text response.
+fn make_resp(code: StatusCode, msg: impl Into<String>) -> Response<Body> {
+    Response::builder()
+        .status(code)
+        .body(Body::from(msg.into() + "\n"))
+        .unwrap()
 }
