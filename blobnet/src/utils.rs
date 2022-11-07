@@ -58,7 +58,7 @@ pub(crate) fn hash_path(hash: &str) -> Result<String> {
 pub(crate) fn atomic_copy(mut source: impl Read, dest: impl AsRef<Path>) -> Result<bool> {
     let dest = dest.as_ref();
 
-    if fs::metadata(&dest).is_err() {
+    if fs::metadata(dest).is_err() {
         let parent = dest
             .parent()
             .ok_or_else(|| anyhow!("parent of destination path {dest:?} does not exist"))?
@@ -68,7 +68,7 @@ pub(crate) fn atomic_copy(mut source: impl Read, dest: impl AsRef<Path>) -> Resu
         let mut file = NamedTempFile::new_in(parent)?;
         std::io::copy(&mut source, &mut file)?;
 
-        if let Err(err) = file.persist_noclobber(&dest) {
+        if let Err(err) = file.persist_noclobber(dest) {
             // Ignore error if another caller created the file in the meantime.
             if err.error.kind() != ErrorKind::AlreadyExists {
                 return Err(err.into());

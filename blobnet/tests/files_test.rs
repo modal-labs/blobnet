@@ -2,7 +2,6 @@ use anyhow::Result;
 use blobnet::client::FileClient;
 use blobnet::server::{listen, Config};
 use blobnet::{provider, ReadStream};
-use hyper::client::HttpConnector;
 use hyper::{body::Bytes, server::conn::AddrIncoming, Body};
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
