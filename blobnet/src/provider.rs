@@ -77,16 +77,19 @@ impl Provider for Memory {
     }
 
     async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
+        if let Some(res) = check_range(range)? {
+            return Ok(res);
+        }
         let data = self.data.read();
         let mut bytes = match data.get(hash) {
             Some(bytes) => bytes.clone(),
             None => return Err(Error::NotFound),
         };
         if let Some((start, end)) = range {
-            if start > end || end > bytes.len() as u64 {
+            if start >= bytes.len() as u64 {
                 return Err(Error::BadRange);
             }
-            bytes = bytes.slice(start as usize..end as usize);
+            bytes = bytes.slice(start as usize..bytes.len().min(end as usize));
         }
         Ok(Box::pin(Cursor::new(bytes)))
     }
@@ -155,7 +158,7 @@ impl Provider for S3 {
             .get_object()
             .bucket(&self.bucket)
             .key(key)
-            .set_range(range.map(|(start, end)| format!("{}-{}", start, end - 1)))
+            .set_range(range.map(|(start, end)| format!("bytes={}-{}", start, end - 1)))
             .send()
             .await;
 
@@ -165,6 +168,10 @@ impl Provider for S3 {
                 if matches!(err.kind, GetObjectErrorKind::NoSuchKey(_)) =>
             {
                 Err(Error::NotFound)
+            }
+            // InvalidRange isn't supported on the `GetObjectErrorKind` enum.
+            Err(SdkError::ServiceError { err, .. }) if err.code() == Some("InvalidRange") => {
+                Err(Error::BadRange)
             }
             Err(err) => Err(Error::Internal(err.into())),
         }
@@ -231,7 +238,7 @@ impl Provider for LocalDir {
         };
         if let Some((start, end)) = range {
             let len = file.metadata().await?.len();
-            if end > len {
+            if start >= len {
                 Err(Error::BadRange)
             } else {
                 file.seek(SeekFrom::Start(start)).await?;
@@ -352,13 +359,13 @@ pub struct Cached<P> {
 /// An in-memory, two-stage LRU based page cache.
 struct PageCache {
     advisor: CacheAdvisor,
-    mapping: BiHashMap<(String, u32), u64>,
+    mapping: BiHashMap<(String, u64), u64>,
     slab: Slab<Bytes>,
 }
 
 impl PageCache {
     /// Insert an entry into the page cache, with LRU eviction.
-    fn insert(&mut self, hash: String, n: u32, bytes: Bytes) {
+    fn insert(&mut self, hash: String, n: u64, bytes: Bytes) {
         let cost = bytes.len() + 100;
         let id = self.slab.insert(bytes) as u64;
         if self.mapping.insert_no_overwrite((hash, n), id).is_ok() {
@@ -370,7 +377,7 @@ impl PageCache {
     }
 
     /// Get an entry from the page cache, with LRU eviction.
-    fn get(&mut self, hash: String, n: u32) -> Option<Bytes> {
+    fn get(&mut self, hash: String, n: u64) -> Option<Bytes> {
         let id = *self.mapping.get_by_left(&(hash, n))?;
         let bytes = self.slab.get(id as usize)?.clone();
         let cost = bytes.len() + 100;
@@ -437,7 +444,7 @@ impl<P> CachedState<P> {
     /// The first cache page of each hash stores HEAD metadata. After that,
     /// index `n` stores the byte range from `(n - 1) * pagesize` to `n *
     /// pagesize`.
-    async fn with_cache<F, Out>(&self, hash: String, n: u32, func: F) -> Result<Bytes, Error>
+    async fn with_cache<F, Out>(&self, hash: String, n: u64, func: F) -> Result<Bytes, Error>
     where
         F: FnOnce() -> Out,
         Out: Future<Output = Result<Bytes, Error>>,
@@ -484,13 +491,12 @@ impl<P> CachedState<P> {
     }
 }
 
-#[async_trait]
-impl<P: Provider + 'static> Provider for Cached<P> {
-    async fn head(&self, hash: &str) -> Result<u64, Error> {
+impl<P: Provider> CachedState<P> {
+    /// Read the size of a file, with caching.
+    async fn get_cached_size(&self, hash: &str) -> Result<u64, Error> {
         let size = self
-            .state
             .with_cache(hash.into(), 0, || async {
-                let size = self.state.inner.head(hash).await?;
+                let size = self.inner.head(hash).await?;
                 Ok(Bytes::from_iter(size.to_le_bytes()))
             })
             .await?;
@@ -499,54 +505,85 @@ impl<P: Provider + 'static> Provider for Cached<P> {
         ))
     }
 
+    /// Read a chunk of data, with caching.
+    async fn get_cached_chunk(&self, hash: &str, n: u64) -> Result<Bytes, Error> {
+        assert!(n > 0, "chunks of file data start at 1");
+
+        let lo = (n - 1) * self.pagesize;
+        let hi = n * self.pagesize;
+
+        self.with_cache(hash.into(), n, move || async move {
+            Ok(read_to_vec(self.inner.get(hash, Some((lo, hi))).await?)
+                .await?
+                .into())
+        })
+        .await
+    }
+}
+
+#[async_trait]
+impl<P: Provider + 'static> Provider for Cached<P> {
+    async fn head(&self, hash: &str) -> Result<u64, Error> {
+        self.state.get_cached_size(hash).await
+    }
+
     async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
-        let len = self.head(hash).await?;
-        let (start, end) = match range {
-            Some(range) => range,
-            None => (0, len),
-        };
+        let (start, end) = range.unwrap_or((0, u64::MAX));
         if let Some(res) = check_range(range)? {
             return Ok(res);
         }
-        if end > len {
+
+        let chunk_begin: u64 = 1 + start / self.state.pagesize;
+        let chunk_end: u64 = 1 + (end - 1) / self.state.pagesize;
+        debug_assert!(chunk_begin >= 1);
+        debug_assert!(chunk_begin <= chunk_end);
+
+        // Read the first chunk, and return BadRange if out of bounds (or NotFound if
+        // non-existent). Otherwise, the range should be valid, and we can continue
+        // reading until we reach the end of the requested range or get an error.
+        let first_chunk = self.state.get_cached_chunk(hash, chunk_begin).await?;
+        let initial_offset = start - (chunk_begin - 1) * self.state.pagesize;
+        if initial_offset >= first_chunk.len() as u64 {
             return Err(Error::BadRange);
         }
 
-        let chunk_begin: u32 = (1 + start / self.state.pagesize)
-            .try_into()
-            .map_err(anyhow::Error::from)?;
-        let chunk_end: u32 = (1 + (end - 1) / self.state.pagesize)
-            .try_into()
-            .map_err(anyhow::Error::from)?;
-        debug_assert!(chunk_begin >= 1);
-        debug_assert!(chunk_begin <= chunk_end);
+        let first_chunk = first_chunk.slice(initial_offset as usize..);
+        // If it fits in a single chunk, just return the data immediately.
+        if first_chunk.len() as u64 > end - start {
+            return Ok(Box::pin(Cursor::new(
+                first_chunk.slice(..(end - start) as usize),
+            )));
+        }
+        let remaining_bytes = Arc::new(Mutex::new(end - start - first_chunk.len() as u64));
 
         let state = Arc::clone(&self.state);
         let hash = hash.to_string();
         let stream = tokio_stream::iter(chunk_begin..=chunk_end).then(move |chunk| {
             let state = Arc::clone(&state);
+            let remaining_bytes = Arc::clone(&remaining_bytes);
+            let first_chunk = first_chunk.clone();
             let hash = hash.clone();
-            let lo = (chunk as u64 - 1) * state.pagesize;
-            let hi = (chunk as u64 * state.pagesize).min(len);
-            async move {
-                let mut bytes = Arc::clone(&state)
-                    .with_cache(hash.clone(), chunk, move || async move {
-                        Ok(read_to_vec(state.inner.get(&hash, Some((lo, hi))).await?)
-                            .await?
-                            .into())
-                    })
-                    .await?;
 
-                // Trim off possible extra bytes from the beginning and end of the page
-                // size-aligned range.
-                if start > lo {
-                    bytes = bytes.slice((start - lo) as usize..);
+            async move {
+                if chunk == chunk_begin {
+                    return Ok::<_, Error>(first_chunk);
                 }
-                if hi > end {
-                    bytes = bytes.slice(0..bytes.len() - (hi - end) as usize);
+                let bytes = state.get_cached_chunk(&hash, chunk).await?;
+                let mut remaining_bytes = remaining_bytes.lock();
+                if bytes.len() as u64 > *remaining_bytes {
+                    let result = bytes.slice(..*remaining_bytes as usize);
+                    *remaining_bytes = 0;
+                    Ok(result)
+                } else {
+                    *remaining_bytes -= bytes.len() as u64;
+                    Ok(bytes)
                 }
-                Ok::<_, Error>(bytes)
             }
+        });
+        let stream = stream.take_while(|result| match result {
+            Ok(bytes) => !bytes.is_empty(),
+            Err(Error::BadRange) => false, // gracefully end the stream
+            Err(_) => true,
         });
         Ok(Box::pin(StreamReader::new(stream)))
     }
