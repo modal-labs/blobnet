@@ -375,7 +375,7 @@ impl PageCache {
         if self.mapping.insert_no_overwrite((hash, n), id).is_ok() {
             for (removed_id, _) in self.advisor.accessed_reuse_buffer(id, cost) {
                 self.mapping.remove_by_right(removed_id);
-                self.slab.remove(*removed_id as usize);
+                self.slab.try_remove(*removed_id as usize);
             }
         }
     }
@@ -387,7 +387,7 @@ impl PageCache {
         let cost = bytes.len() + 100;
         for (removed_id, _) in self.advisor.accessed_reuse_buffer(id, cost) {
             self.mapping.remove_by_right(removed_id);
-            self.slab.remove(*removed_id as usize);
+            self.slab.try_remove(*removed_id as usize);
         }
         Some(bytes)
     }
