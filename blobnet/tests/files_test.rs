@@ -107,7 +107,26 @@ async fn large_50mb_stream() -> Result<()> {
         eat(client.get(&h1, Some((49999996, 50000000))).await?).await?,
         "eeee"
     );
-    assert!(client.get(&h1, Some((0, 50000001))).await.is_err());
+
+    // Reading past the end of the stream should truncate.
+    assert_eq!(
+        eat(client.get(&h1, Some((49950000, 60000013))).await?)
+            .await?
+            .len(),
+        50000
+    );
+
+    // Starting past the end of the range is invalid, though.
+    assert!(matches!(
+        client.get(&h1, Some((50000000, 50000001))).await,
+        Err(blobnet::Error::BadRange),
+    ));
+
+    // Make sure that we can stream a range of the entire file without any issues.
+    let mut entire_file = client.get(&h1, None).await?;
+    let mut buf = vec![0; 1 << 22];
+    entire_file.read_exact(&mut buf).await?;
+    assert!(buf.starts_with(b"aaaaaaaaaaaaaaaaaaaaaaaa"));
 
     Ok(())
 }
