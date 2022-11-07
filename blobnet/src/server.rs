@@ -97,7 +97,7 @@ async fn handle(config: Arc<Config>, req: Request<Body>) -> Result<Response<Body
             let hash = config.provider.put(body_stream(body)).await?;
             Ok(Response::new(Body::from(hash)))
         }
-        _ => Err(make_resp(StatusCode::NOT_FOUND, "path pattern not found")),
+        _ => Err(make_resp(StatusCode::NOT_FOUND, "invalid request path")),
     }
 }
 

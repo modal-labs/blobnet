@@ -188,7 +188,7 @@ impl Provider for S3 {
             .put_object()
             .bucket(&self.bucket)
             .key(hash_path(&hash)?)
-            .checksum_sha256(&hash)
+            .checksum_sha256(base64::encode(hex::decode(&hash).unwrap()))
             .body(body)
             .send()
             .await
