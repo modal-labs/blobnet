@@ -28,12 +28,6 @@ async fn spawn_temp_server() -> Result<String> {
     Ok(format!("http://{addr}"))
 }
 
-fn http() -> HttpConnector {
-    let mut conn = HttpConnector::new();
-    conn.set_nodelay(true);
-    conn
-}
-
 async fn eat(mut stream: ReadStream) -> Result<String> {
     let mut buf = String::new();
     stream.read_to_string(&mut buf).await?;
@@ -43,7 +37,7 @@ async fn eat(mut stream: ReadStream) -> Result<String> {
 #[tokio::test]
 async fn single_file() -> Result<()> {
     let origin = spawn_temp_server().await?;
-    let client = FileClient::new(http(), &origin, "secret");
+    let client = FileClient::new_http(&origin, "secret");
 
     let s1 = "hello world!";
     let h1 = client.put(|| async { Ok(s1) }).await?;
@@ -56,7 +50,7 @@ async fn single_file() -> Result<()> {
 #[tokio::test]
 async fn missing_file() -> Result<()> {
     let origin = spawn_temp_server().await?;
-    let client = FileClient::new(http(), &origin, "secret");
+    let client = FileClient::new_http(&origin, "secret");
 
     assert!(client.get("not a valid sha-256 hash", None).await.is_err());
 
@@ -72,7 +66,7 @@ async fn missing_file() -> Result<()> {
 #[tokio::test]
 async fn invalid_secret() -> Result<()> {
     let origin = spawn_temp_server().await?;
-    let client = FileClient::new(http(), &origin, "wrong secret");
+    let client = FileClient::new_http(&origin, "wrong secret");
 
     let s1 = "hello world!";
     assert!(client.put(|| async { Ok(s1) }).await.is_err());
@@ -82,7 +76,7 @@ async fn invalid_secret() -> Result<()> {
 #[tokio::test]
 async fn large_50mb_stream() -> Result<()> {
     let origin = spawn_temp_server().await?;
-    let client = FileClient::new(http(), &origin, "secret");
+    let client = FileClient::new_http(&origin, "secret");
 
     let make_body = || async {
         let (mut sender, body) = Body::channel();
