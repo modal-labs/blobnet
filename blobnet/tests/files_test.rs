@@ -44,6 +44,16 @@ async fn single_file() -> Result<()> {
     assert_eq!(eat(client.get(&h1, None).await?).await?, s1);
     assert_eq!(eat(client.get(&h1, Some((0, 2))).await?).await?, &s1[0..2]);
     assert_eq!(eat(client.get(&h1, Some((12, 13))).await?).await?, "");
+
+    assert!(matches!(
+        client.get(&h1, Some((100, 120))).await,
+        Err(blobnet::Error::BadRange),
+    ));
+    assert!(matches!(
+        client.get(&h1, Some((3, 0))).await,
+        Err(blobnet::Error::BadRange),
+    ));
+
     Ok(())
 }
 

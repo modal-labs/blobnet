@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use async_trait::async_trait;
 use auto_impl::auto_impl;
 use aws_sdk_s3::{
@@ -177,14 +177,14 @@ impl Provider for S3 {
             }
             // InvalidRange isn't supported on the `GetObjectErrorKind` enum.
             Err(SdkError::ServiceError { err, .. }) if err.code() == Some("InvalidRange") => {
-                let actual_size = err
-                    .meta()
-                    .extra("ActualObjectSize")
-                    .and_then(|x| x.parse::<u64>().ok());
                 // Edge case: S3 throws errors if the start of the range is at exactly the
                 // length of the file, but we want to support this use case.
-                match (range, actual_size) {
-                    (Some((s, _)), Some(len)) if s == len => Ok(empty_stream()),
+                //
+                // Unfortunately there's no way to get the "<ActualObjectSize>" XML property
+                // from the error response in the current SDK, so we make a second request.
+                let len = self.head(hash).await?;
+                match range {
+                    Some((s, _)) if s == len => Ok(empty_stream()),
                     _ => Err(Error::BadRange),
                 }
             }
@@ -327,12 +327,10 @@ async fn make_data_tempfile(data: ReadStream) -> anyhow::Result<(String, File)> 
 }
 
 fn check_range(range: Option<(u64, u64)>) -> Result<(), Error> {
-    if let Some((start, end)) = range {
-        if start > end {
-            return Err(anyhow!("invalid range: start > end").into());
-        }
+    match range {
+        Some((start, end)) if start > end => Err(Error::BadRange),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 fn empty_stream() -> ReadStream {
@@ -578,6 +576,7 @@ impl<P: Provider + 'static> Provider for Cached<P> {
         // non-existent). Otherwise, the range should be valid, and we can continue
         // reading until we reach the end of the requested range or get an error.
         let first_chunk = self.state.get_cached_chunk(hash, chunk_begin).await?;
+        let reached_end = (first_chunk.len() as u64) < self.state.pagesize;
         let initial_offset = start - (chunk_begin - 1) * self.state.pagesize;
         if initial_offset > first_chunk.len() as u64 {
             return Err(Error::BadRange);
@@ -585,10 +584,9 @@ impl<P: Provider + 'static> Provider for Cached<P> {
 
         let first_chunk = first_chunk.slice(initial_offset as usize..);
         // If it fits in a single chunk, just return the data immediately.
-        if first_chunk.len() as u64 > end - start {
-            return Ok(Box::pin(Cursor::new(
-                first_chunk.slice(..(end - start) as usize),
-            )));
+        if reached_end || first_chunk.len() as u64 > end - start {
+            let total_len = first_chunk.len().min((end - start) as usize);
+            return Ok(Box::pin(Cursor::new(first_chunk.slice(..total_len))));
         }
         let remaining_bytes = Arc::new(Mutex::new(end - start - first_chunk.len() as u64));
 
