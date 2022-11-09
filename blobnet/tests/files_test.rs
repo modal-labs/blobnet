@@ -43,12 +43,13 @@ async fn single_file() -> Result<()> {
 
     assert_eq!(eat(client.get(&h1, None).await?).await?, s1);
     assert_eq!(eat(client.get(&h1, Some((0, 2))).await?).await?, &s1[0..2]);
+    assert_eq!(eat(client.get(&h1, Some((12, 13))).await?).await?, "");
     Ok(())
 }
 
 #[tokio::test]
 async fn empty_file() -> Result<()> {
-    // This is an edge case in how empty files treat ranges.
+    // There should be no edge cases in how empty files treat ranges.
     let hsh = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
     let origin = spawn_temp_server().await?;
@@ -62,9 +63,13 @@ async fn empty_file() -> Result<()> {
     let hsh2 = client.put(|| async { Ok("") }).await?;
     assert_eq!(hsh, hsh2);
 
+    assert!(client.get(hsh, Some((0, 0))).await.is_ok());
+    assert!(client.get(hsh, None).await.is_ok());
+
     assert_eq!(eat(client.get(hsh, None).await?).await?, "");
+    assert_eq!(eat(client.get(hsh, Some((0, 1))).await?).await?, "");
     assert!(matches!(
-        client.get(hsh, Some((0, 1))).await,
+        client.get(hsh, Some((1, 1))).await,
         Err(blobnet::Error::BadRange),
     ));
 
@@ -81,8 +86,10 @@ async fn missing_file() -> Result<()> {
     let s1 = "my favorite poem";
     let hash = format!("{:x}", Sha256::new().chain_update(s1).finalize());
     assert!(client.get(&hash, None).await.is_err());
+    assert!(client.get(&hash, Some((0, 0))).await.is_err());
     assert_eq!(client.put(|| async { Ok(s1) }).await?, hash);
     assert_eq!(eat(client.get(&hash, None).await?).await?, s1);
+    assert_eq!(eat(client.get(&hash, Some((0, 0))).await?).await?, "");
 
     Ok(())
 }
@@ -142,8 +149,9 @@ async fn large_50mb_stream() -> Result<()> {
     );
 
     // Starting past the end of the range is invalid, though.
+    assert!(client.get(&h1, Some((50000000, 50000001))).await.is_ok());
     assert!(matches!(
-        client.get(&h1, Some((50000000, 50000001))).await,
+        client.get(&h1, Some((50000001, 50000001))).await,
         Err(blobnet::Error::BadRange),
     ));
 

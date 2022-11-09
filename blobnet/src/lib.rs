@@ -50,8 +50,8 @@ pub enum Error {
     /// The requested range was not satisfiable.
     ///
     /// This occurs if the start is greater than the end of the range, or if the
-    /// start is past the file's length. It's okay for the end of the range to
-    /// be past the end of the file; the output will be truncated.
+    /// start is strictly past the file's length. It's okay for the end of the
+    /// range to be after the end of the file; the output will be truncated.
     #[error("range not satisfiable")]
     BadRange,
 

@@ -29,10 +29,6 @@ use crate::client::FileClient;
 use crate::utils::{atomic_copy, hash_path, stream_body};
 use crate::{read_to_vec, Error, ReadStream};
 
-/// The SHA-256 hash of the empty string. This handles an edge case.
-const SHA256_EMPTY_STRING: &str =
-    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
 /// Specifies a storage backend for the blobnet service.
 ///
 /// Each method returns an error only when some operational problem occurs, such
@@ -79,16 +75,14 @@ impl Provider for Memory {
     }
 
     async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
-        if let Some(res) = check_range(range)? {
-            return Ok(res);
-        }
+        check_range(range)?;
         let data = self.data.read();
         let mut bytes = match data.get(hash) {
             Some(bytes) => bytes.clone(),
             None => return Err(Error::NotFound),
         };
         if let Some((start, end)) = range {
-            if start >= bytes.len() as u64 {
+            if start > bytes.len() as u64 {
                 return Err(Error::BadRange);
             }
             bytes = bytes.slice(start as usize..bytes.len().min(end as usize));
@@ -151,9 +145,19 @@ impl Provider for S3 {
     }
 
     async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
-        if let Some(res) = check_range(range)? {
-            return Ok(res);
+        check_range(range)?;
+
+        if matches!(range, Some((s, e)) if s == e) {
+            // Special case: The range has length 0, and S3 doesn't support
+            // zero-length ranges directly, so we need a different request.
+            let len = self.head(hash).await?;
+            if range.unwrap().0 > len {
+                return Err(Error::BadRange);
+            } else {
+                return Ok(empty_stream());
+            }
         }
+
         let key = hash_path(hash)?;
         let result = self
             .client
@@ -173,7 +177,16 @@ impl Provider for S3 {
             }
             // InvalidRange isn't supported on the `GetObjectErrorKind` enum.
             Err(SdkError::ServiceError { err, .. }) if err.code() == Some("InvalidRange") => {
-                Err(Error::BadRange)
+                let actual_size = err
+                    .meta()
+                    .extra("ActualObjectSize")
+                    .and_then(|x| x.parse::<u64>().ok());
+                // Edge case: S3 throws errors if the start of the range is at exactly the
+                // length of the file, but we want to support this use case.
+                match (range, actual_size) {
+                    (Some((s, _)), Some(len)) if s == len => Ok(empty_stream()),
+                    _ => Err(Error::BadRange),
+                }
             }
             Err(err) => Err(Error::Internal(err.into())),
         }
@@ -228,9 +241,7 @@ impl Provider for LocalDir {
     }
 
     async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
-        if let Some(res) = check_range(range)? {
-            return Ok(res);
-        }
+        check_range(range)?;
         let key = hash_path(hash)?;
         let path = self.dir.join(key);
         let mut file = match File::open(&path).await {
@@ -240,7 +251,7 @@ impl Provider for LocalDir {
         };
         if let Some((start, end)) = range {
             let len = file.metadata().await?.len();
-            if start >= len {
+            if start > len {
                 Err(Error::BadRange)
             } else {
                 file.seek(SeekFrom::Start(start)).await?;
@@ -315,17 +326,17 @@ async fn make_data_tempfile(data: ReadStream) -> anyhow::Result<(String, File)> 
     Ok((hash, file))
 }
 
-fn check_range(range: Option<(u64, u64)>) -> Result<Option<ReadStream>, Error> {
+fn check_range(range: Option<(u64, u64)>) -> Result<(), Error> {
     if let Some((start, end)) = range {
-        #[allow(clippy::comparison_chain)]
         if start > end {
             return Err(anyhow!("invalid range: start > end").into());
-        } else if start == end {
-            // Short-circuit to return an empty stream.
-            return Ok(Some(Box::pin(Cursor::new(Bytes::new()))));
         }
     }
-    Ok(None)
+    Ok(())
+}
+
+fn empty_stream() -> ReadStream {
+    Box::pin(Cursor::new(Bytes::new()))
 }
 
 // A pair of providers is also a provider, acting as a fallback.
@@ -545,19 +556,17 @@ impl<P: Provider + 'static> Provider for Cached<P> {
     }
 
     async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
-        // Edge case: if the blob is empty, then we can't directly match a `None` range
-        // to the range `0..u64::MAX` because the latter should return an out-of-bounds
-        // error. This is the only case where this transformation fails semantically.
-        //
-        // To correct for this, we simply return an empty value in this case.
-        if hash == SHA256_EMPTY_STRING && range.is_none() {
-            self.state.get_cached_size(hash).await?; // Make sure the blob has been uploaded before.
-            return Ok(Box::pin(Cursor::new(Bytes::new())));
-        }
-
         let (start, end) = range.unwrap_or((0, u64::MAX));
-        if let Some(res) = check_range(range)? {
-            return Ok(res);
+        check_range(range)?;
+
+        if start == end {
+            // Special case: The range has length 0, so we can't divide it into chunks.
+            let len = self.head(hash).await?;
+            if start > len {
+                return Err(Error::BadRange);
+            } else {
+                return Ok(empty_stream());
+            }
         }
 
         let chunk_begin: u64 = 1 + start / self.state.pagesize;
@@ -570,7 +579,7 @@ impl<P: Provider + 'static> Provider for Cached<P> {
         // reading until we reach the end of the requested range or get an error.
         let first_chunk = self.state.get_cached_chunk(hash, chunk_begin).await?;
         let initial_offset = start - (chunk_begin - 1) * self.state.pagesize;
-        if initial_offset >= first_chunk.len() as u64 {
+        if initial_offset > first_chunk.len() as u64 {
             return Err(Error::BadRange);
         }
 
