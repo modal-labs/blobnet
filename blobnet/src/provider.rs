@@ -14,12 +14,10 @@ use aws_sdk_s3::{
     error::{GetObjectErrorKind, HeadObjectErrorKind},
     types::{ByteStream, SdkError},
 };
-use bimap::BiHashMap;
-use cache_advisor::CacheAdvisor;
+use hashlink::LinkedHashMap;
 use hyper::{body::Bytes, client::connect::Connect};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
-use slab::Slab;
 use tempfile::tempfile;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
@@ -360,45 +358,60 @@ pub struct Cached<P> {
     state: Arc<CachedState<P>>,
 }
 
+/// Constant cost associated with every entry in the page cache.
+const PAGE_CACHE_ENTRY_COST: u64 = 80;
+
 /// An in-memory, two-stage LRU based page cache.
 struct PageCache {
-    advisor: CacheAdvisor,
-    mapping: BiHashMap<(String, u64), u64>,
-    slab: Slab<Bytes>,
+    /// A mapping from `(hash, offset)` pairs to shared references to data.
+    mapping: LinkedHashMap<(String, u64), Bytes>,
+    /// The total cached pages' size, plus a fixed [`PAGE_CACHE_ENTRY_COST`].
+    total_cost: u64,
+    /// The maximum cost size of the page cache in bytes.
+    total_capacity: u64,
 }
 
 impl PageCache {
     /// Insert an entry into the page cache, with LRU eviction.
     fn insert(&mut self, hash: String, n: u64, bytes: Bytes) {
-        let cost = bytes.len() + 100;
-        let id = self.slab.insert(bytes) as u64;
-        if self.mapping.insert_no_overwrite((hash, n), id).is_ok() {
-            for (removed_id, _) in self.advisor.accessed_reuse_buffer(id, cost) {
-                self.mapping.remove_by_right(removed_id);
-                self.slab.try_remove(*removed_id as usize);
+        use hashlink::linked_hash_map::Entry;
+
+        match self.mapping.entry((hash, n)) {
+            Entry::Occupied(mut o) => o.to_back(),
+            Entry::Vacant(v) => {
+                v.insert(bytes.clone());
+                self.total_cost += bytes.len() as u64 + PAGE_CACHE_ENTRY_COST;
+                while self.total_cost > self.total_capacity {
+                    // This should never panic because of a data structure invariant. If we reached
+                    // this line, the total cost in the page cache must be nonzero, so there must be
+                    // still pages in the mapping.
+                    let (_, bytes) = self.mapping.pop_front().expect("cache with cost items");
+                    self.total_cost -= bytes.len() as u64 + PAGE_CACHE_ENTRY_COST;
+                }
             }
         }
     }
 
     /// Get an entry from the page cache, with LRU eviction.
     fn get(&mut self, hash: String, n: u64) -> Option<Bytes> {
-        let id = *self.mapping.get_by_left(&(hash, n))?;
-        let bytes = self.slab.get(id as usize)?.clone();
-        let cost = bytes.len() + 100;
-        for (removed_id, _) in self.advisor.accessed_reuse_buffer(id, cost) {
-            self.mapping.remove_by_right(removed_id);
-            self.slab.try_remove(*removed_id as usize);
+        use hashlink::linked_hash_map::Entry;
+
+        match self.mapping.entry((hash, n)) {
+            Entry::Occupied(mut o) => {
+                o.to_back();
+                Some(o.get().clone())
+            }
+            Entry::Vacant(_) => None,
         }
-        Some(bytes)
     }
 }
 
 impl Default for PageCache {
     fn default() -> Self {
         Self {
-            advisor: CacheAdvisor::new(1 << 25, 20), // 32 MiB in-memory page cache
-            mapping: BiHashMap::new(),
-            slab: Slab::new(),
+            mapping: LinkedHashMap::new(),
+            total_cost: 0,
+            total_capacity: 1 << 25, // 32 MiB in-memory page cache
         }
     }
 }
@@ -625,7 +638,18 @@ mod tests {
         }
         assert_eq!(cache.get(String::new(), 0), None);
         assert_eq!(cache.get(String::new(), 4095), Some(bigpage));
-        assert!(cache.slab.len() < 2048);
+        assert!(cache.mapping.len() < 2048);
+    }
+
+    #[test]
+    fn page_cache_duplicates() {
+        let mut cache = PageCache::default();
+        let page = Bytes::from(vec![42; 256]);
+        for _ in 0..4096 {
+            cache.insert(String::new(), 0, page.clone());
+        }
+        assert_eq!(cache.get(String::new(), 0), Some(page));
+        assert!(cache.mapping.len() == 1);
     }
 
     #[tokio::test]
