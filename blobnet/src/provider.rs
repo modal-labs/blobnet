@@ -83,7 +83,7 @@ impl Provider for Memory {
         };
         if let Some((start, end)) = range {
             if start > bytes.len() as u64 {
-                return Err(Error::BadRange);
+                return Ok(empty_stream());
             }
             bytes = bytes.slice(start as usize..bytes.len().min(end as usize));
         }
@@ -150,12 +150,8 @@ impl Provider for S3 {
         if matches!(range, Some((s, e)) if s == e) {
             // Special case: The range has length 0, and S3 doesn't support
             // zero-length ranges directly, so we need a different request.
-            let len = self.head(hash).await?;
-            if range.unwrap().0 > len {
-                return Err(Error::BadRange);
-            } else {
-                return Ok(empty_stream());
-            }
+            self.head(hash).await?;
+            return Ok(empty_stream());
         }
 
         let key = hash_path(hash)?;
@@ -177,16 +173,9 @@ impl Provider for S3 {
             }
             // InvalidRange isn't supported on the `GetObjectErrorKind` enum.
             Err(SdkError::ServiceError { err, .. }) if err.code() == Some("InvalidRange") => {
-                // Edge case: S3 throws errors if the start of the range is at exactly the
-                // length of the file, but we want to support this use case.
-                //
-                // Unfortunately there's no way to get the "<ActualObjectSize>" XML property
-                // from the error response in the current SDK, so we make a second request.
-                let len = self.head(hash).await?;
-                match range {
-                    Some((s, _)) if s == len => Ok(empty_stream()),
-                    _ => Err(Error::BadRange),
-                }
+                // Edge case: S3 throws errors if the start of the range is at or after the
+                // end of the file, but we want to support this for consistency.
+                Ok(empty_stream())
             }
             Err(err) => Err(Error::Internal(err.into())),
         }
@@ -250,13 +239,10 @@ impl Provider for LocalDir {
             Err(err) => return Err(err.into()),
         };
         if let Some((start, end)) = range {
-            let len = file.metadata().await?.len();
-            if start > len {
-                Err(Error::BadRange)
-            } else {
+            if start != 0 {
                 file.seek(SeekFrom::Start(start)).await?;
-                Ok(Box::pin(file.take(end - start)))
             }
+            Ok(Box::pin(file.take(end - start)))
         } else {
             Ok(Box::pin(file))
         }
@@ -420,7 +406,7 @@ impl Default for PageCache {
         Self {
             mapping: LinkedHashMap::new(),
             total_cost: 0,
-            total_capacity: 1 << 25, // 32 MiB in-memory page cache
+            total_capacity: 1 << 26, // 64 MiB in-memory page cache
         }
     }
 }
@@ -559,12 +545,8 @@ impl<P: Provider + 'static> Provider for Cached<P> {
 
         if start == end {
             // Special case: The range has length 0, so we can't divide it into chunks.
-            let len = self.head(hash).await?;
-            if start > len {
-                return Err(Error::BadRange);
-            } else {
-                return Ok(empty_stream());
-            }
+            self.head(hash).await?;
+            return Ok(empty_stream());
         }
 
         let chunk_begin: u64 = 1 + start / self.state.pagesize;
@@ -572,16 +554,16 @@ impl<P: Provider + 'static> Provider for Cached<P> {
         debug_assert!(chunk_begin >= 1);
         debug_assert!(chunk_begin <= chunk_end);
 
-        // Read the first chunk, and return BadRange if out of bounds (or NotFound if
+        // Read the first chunk, and return empty data if out of bounds (or NotFound if
         // non-existent). Otherwise, the range should be valid, and we can continue
         // reading until we reach the end of the requested range or get an error.
         let first_chunk = self.state.get_cached_chunk(hash, chunk_begin).await?;
-        let reached_end = (first_chunk.len() as u64) < self.state.pagesize;
         let initial_offset = start - (chunk_begin - 1) * self.state.pagesize;
         if initial_offset > first_chunk.len() as u64 {
-            return Err(Error::BadRange);
+            return Ok(empty_stream());
         }
 
+        let reached_end = (first_chunk.len() as u64) < self.state.pagesize;
         let first_chunk = first_chunk.slice(initial_offset as usize..);
         // If it fits in a single chunk, just return the data immediately.
         if reached_end || first_chunk.len() as u64 > end - start {
@@ -615,8 +597,7 @@ impl<P: Provider + 'static> Provider for Cached<P> {
             }
         });
         let stream = stream.take_while(|result| match result {
-            Ok(bytes) => !bytes.is_empty(),
-            Err(Error::BadRange) => false, // gracefully end the stream
+            Ok(bytes) => !bytes.is_empty(), // gracefully end the stream
             Err(_) => true,
         });
         Ok(Box::pin(StreamReader::new(stream)))

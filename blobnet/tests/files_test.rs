@@ -45,10 +45,7 @@ async fn single_file() -> Result<()> {
     assert_eq!(eat(client.get(&h1, Some((0, 2))).await?).await?, &s1[0..2]);
     assert_eq!(eat(client.get(&h1, Some((12, 13))).await?).await?, "");
 
-    assert!(matches!(
-        client.get(&h1, Some((100, 120))).await,
-        Err(blobnet::Error::BadRange),
-    ));
+    assert_eq!(eat(client.get(&h1, Some((100, 120))).await?).await?, "");
     assert!(matches!(
         client.get(&h1, Some((3, 0))).await,
         Err(blobnet::Error::BadRange),
@@ -78,8 +75,9 @@ async fn empty_file() -> Result<()> {
 
     assert_eq!(eat(client.get(hsh, None).await?).await?, "");
     assert_eq!(eat(client.get(hsh, Some((0, 1))).await?).await?, "");
+    assert_eq!(eat(client.get(hsh, Some((10, 20))).await?).await?, "");
     assert!(matches!(
-        client.get(hsh, Some((1, 1))).await,
+        client.get(hsh, Some((3, 2))).await,
         Err(blobnet::Error::BadRange),
     ));
 
@@ -158,12 +156,9 @@ async fn large_50mb_stream() -> Result<()> {
         50000
     );
 
-    // Starting past the end of the range is invalid, though.
+    // Starting past the end of the range is okay too.
     assert!(client.get(&h1, Some((50000000, 50000001))).await.is_ok());
-    assert!(matches!(
-        client.get(&h1, Some((50000001, 50000001))).await,
-        Err(blobnet::Error::BadRange),
-    ));
+    assert!(client.get(&h1, Some((50000001, 50000001))).await.is_ok());
 
     // Make sure that we can stream a range of the entire file without any issues.
     let mut entire_file = client.get(&h1, None).await?;
