@@ -477,9 +477,11 @@ impl<P> CachedState<P> {
 
         let bytes = func().await?;
         let read_buf = Cursor::new(bytes.clone());
-        task::spawn_blocking(move || atomic_copy(read_buf, &path))
-            .await
-            .map_err(anyhow::Error::from)??;
+        task::spawn_blocking(move || {
+            if let Err(err) = atomic_copy(read_buf, &path) {
+                eprintln!("error writing {path:?} cache file: {err:?}");
+            }
+        });
         self.page_cache.lock().insert(hash, n, bytes.clone());
         Ok(bytes)
     }
