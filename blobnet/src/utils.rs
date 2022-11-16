@@ -1,8 +1,8 @@
 //! File system and hash utilities used by the file server.
 
-use std::io::{ErrorKind, Read};
+use std::fs;
+use std::io::{self, BufWriter, ErrorKind, Read};
 use std::path::Path;
-use std::{fs, io};
 
 use anyhow::{anyhow, ensure, Result};
 use hyper::Body;
@@ -66,7 +66,10 @@ pub(crate) fn atomic_copy(mut source: impl Read, dest: impl AsRef<Path>) -> Resu
 
         fs::create_dir_all(&parent)?;
         let mut file = NamedTempFile::new_in(parent)?;
-        std::io::copy(&mut source, &mut file)?;
+        {
+            let mut writer = BufWriter::with_capacity(1 << 21, &mut file);
+            std::io::copy(&mut source, &mut writer)?;
+        }
 
         if let Err(err) = file.persist_noclobber(dest) {
             // Ignore error if another caller created the file in the meantime.
