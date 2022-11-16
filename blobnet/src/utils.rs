@@ -68,7 +68,7 @@ pub(crate) fn atomic_copy(mut source: impl Read, dest: impl AsRef<Path>) -> Resu
         let mut file = NamedTempFile::new_in(parent)?;
         {
             let mut writer = BufWriter::with_capacity(1 << 21, &mut file);
-            std::io::copy(&mut source, &mut writer)?;
+            io::copy(&mut source, &mut writer)?;
         }
 
         if let Err(err) = file.persist_noclobber(dest) {
