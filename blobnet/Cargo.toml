@@ -1,6 +1,6 @@
 [package]
 name = "blobnet"
-version = "0.2.4"
+version = "0.2.5"
 authors = ["Eric Zhang <ekzhang1@gmail.com>"]
 license = "MIT"
 description = "Non-volatile, distributed file cache backed by content-addressed storage."

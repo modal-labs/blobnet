@@ -5,15 +5,17 @@
 
 A configurable, low-latency blob storage server for content-addressed data.
 
-This acts as a non-volatile, over-the-network content cache. Internal users can
-add binary blobs to the cache, and the data is indexed by its SHA-256 hash. Any
-blob can be retrieved by its hash and the range of bytes to read.
+See the [API documentation](https://docs.rs/blobnet) for more information.
 
-Data stored in blobnet is locally cached and durable.
+## Installation
 
-## Usage
+```bash
+cargo install blobnet  # install server CLI / binary
+cargo add blobnet      # add to your project
+```
 
-Run `cargo install blobnet` and see the server options through a CLI. The server
-supports only three types of requests (`HEAD` / `GET` / `PUT`), and a full
-client implementation, including optional secondary local caching, is in the
-`blobnet` library crate.
+## Authors
+
+This library is created by the team behind [Modal](https://modal.com/).
+
+- Eric Zhang ([@ekzhang1](https://twitter.com/ekzhang1)) – [Modal](https://modal.com/)

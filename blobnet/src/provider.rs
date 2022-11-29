@@ -41,15 +41,33 @@ use crate::{read_to_vec, Error, ReadStream};
 #[auto_impl(&, Box, Arc)]
 pub trait Provider: Send + Sync {
     /// Check if a file exists and returns its size in bytes.
+    ///
+    /// Equivalent to:
+    ///
+    /// ```ignore
+    /// async fn head(&self, hash: &str) -> Result<u64, Error>;
+    /// ```
     async fn head(&self, hash: &str) -> Result<u64, Error>;
 
     /// Returns the data from the file at the given path.
+    ///
+    /// Equivalent to:
+    ///
+    /// ```ignore
+    /// async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error>;
+    /// ```
     async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error>;
 
     /// Adds a binary blob to storage, returning its hash.
     ///
     /// This function is not as latency-sensitive as the others, caring more
     /// about throughput. It may take two passes over the data.
+    ///
+    /// Equivalent to:
+    ///
+    /// ```ignore
+    /// async fn put(&self, data: ReadStream) -> Result<String, Error>;
+    /// ```
     async fn put(&self, data: ReadStream) -> Result<String, Error>;
 }
 
