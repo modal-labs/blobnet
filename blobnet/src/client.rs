@@ -12,7 +12,7 @@ use crate::headers::{HEADER_FILE_LENGTH, HEADER_RANGE, HEADER_SECRET};
 #[cfg(doc)]
 use crate::provider::Remote;
 use crate::utils::body_stream;
-use crate::{Error, ReadStream};
+use crate::{BlobRange, Error, ReadStream};
 
 /// An asynchronous client for the file server.
 ///
@@ -102,11 +102,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
     }
 
     /// Read a range of bytes from a file.
-    pub async fn get(
-        &self,
-        hash: &str,
-        range: Option<(u64, u64)>,
-    ) -> Result<ReadStream<'static>, Error> {
+    pub async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
         let make_req = || async {
             let mut req = Request::builder()
                 .method("GET")

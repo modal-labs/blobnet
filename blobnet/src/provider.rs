@@ -27,7 +27,7 @@ use tokio_util::io::StreamReader;
 
 use crate::client::FileClient;
 use crate::utils::{atomic_copy, hash_path, stream_body};
-use crate::{read_to_vec, Error, ReadStream};
+use crate::{read_to_vec, BlobRange, Error, ReadStream};
 
 /// Specifies a storage backend for the blobnet service.
 ///
@@ -56,11 +56,7 @@ pub trait Provider: Send + Sync {
     /// ```ignore
     /// async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream<'static>, Error>;
     /// ```
-    async fn get(
-        &self,
-        hash: &str,
-        range: Option<(u64, u64)>,
-    ) -> Result<ReadStream<'static>, Error>;
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error>;
 
     /// Adds a binary blob to storage, returning its hash.
     ///
@@ -96,11 +92,7 @@ impl Provider for Memory {
         Ok(bytes.len() as u64)
     }
 
-    async fn get(
-        &self,
-        hash: &str,
-        range: Option<(u64, u64)>,
-    ) -> Result<ReadStream<'static>, Error> {
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
         check_range(range)?;
         let data = self.data.read();
         let mut bytes = match data.get(hash) {
@@ -170,11 +162,7 @@ impl Provider for S3 {
         }
     }
 
-    async fn get(
-        &self,
-        hash: &str,
-        range: Option<(u64, u64)>,
-    ) -> Result<ReadStream<'static>, Error> {
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
         check_range(range)?;
 
         if matches!(range, Some((s, e)) if s == e) {
@@ -259,11 +247,7 @@ impl Provider for LocalDir {
         }
     }
 
-    async fn get(
-        &self,
-        hash: &str,
-        range: Option<(u64, u64)>,
-    ) -> Result<ReadStream<'static>, Error> {
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
         check_range(range)?;
         let key = hash_path(hash)?;
         let path = self.dir.join(key);
@@ -312,11 +296,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> Provider for Remote<C> {
         self.client.head(hash).await
     }
 
-    async fn get(
-        &self,
-        hash: &str,
-        range: Option<(u64, u64)>,
-    ) -> Result<ReadStream<'static>, Error> {
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
         self.client.get(hash, range).await
     }
 
@@ -350,7 +330,7 @@ async fn make_data_tempfile(data: ReadStream<'_>) -> anyhow::Result<(String, Fil
     Ok((hash, file))
 }
 
-fn check_range(range: Option<(u64, u64)>) -> Result<(), Error> {
+fn check_range(range: BlobRange) -> Result<(), Error> {
     match range {
         Some((start, end)) if start > end => Err(Error::BadRange),
         _ => Ok(()),
@@ -374,11 +354,7 @@ impl<P1: Provider, P2: Provider> Provider for (P1, P2) {
         }
     }
 
-    async fn get(
-        &self,
-        hash: &str,
-        range: Option<(u64, u64)>,
-    ) -> Result<ReadStream<'static>, Error> {
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
         match self.0.get(hash, range).await {
             Ok(res) => Ok(res),
             Err(_) => self.1.get(hash, range).await,
@@ -583,11 +559,7 @@ impl<P: Provider + 'static> Provider for Cached<P> {
         self.state.get_cached_size(hash).await
     }
 
-    async fn get(
-        &self,
-        hash: &str,
-        range: Option<(u64, u64)>,
-    ) -> Result<ReadStream<'static>, Error> {
+    async fn get(&self, hash: &str, range: BlobRange) -> Result<ReadStream<'static>, Error> {
         let (start, end) = range.unwrap_or((0, u64::MAX));
         check_range(range)?;
 

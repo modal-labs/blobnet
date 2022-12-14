@@ -14,7 +14,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::headers::{HEADER_FILE_LENGTH, HEADER_RANGE, HEADER_SECRET};
 use crate::provider::Provider;
 use crate::utils::{body_stream, get_hash, stream_body};
-use crate::{make_resp, Error};
+use crate::{make_resp, BlobRange, Error};
 
 /// Configuration for the file server.
 pub struct Config {
@@ -105,7 +105,7 @@ async fn handle(config: Arc<Config>, req: Request<Body>) -> Result<Response<Body
 ///
 /// The start index is inclusive, and the end index is exclusive. This differs
 /// from the standard HTTP `Range` header, which has both ends inclusive.
-fn parse_range_header(s: &HeaderValue) -> Option<(u64, u64)> {
+fn parse_range_header(s: &HeaderValue) -> BlobRange {
     let s = s.to_str().ok()?;
     let (start, end) = s.split_once('-')?;
     Some((start.parse().ok()?, end.parse().ok()?))

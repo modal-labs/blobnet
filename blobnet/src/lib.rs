@@ -133,6 +133,9 @@ mod headers {
     pub const HEADER_FILE_LENGTH: HeaderName = HeaderName::from_static("x-bn-file-length");
 }
 
+/// Internal type alias for a byte range.
+type BlobRange = Option<(u64, u64)>;
+
 /// A stream of bytes from some data source.
 pub type ReadStream<'a> = Pin<Box<dyn AsyncRead + Send + 'a>>;
 
