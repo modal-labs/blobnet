@@ -134,10 +134,10 @@ mod headers {
 }
 
 /// A stream of bytes from some data source.
-pub type ReadStream = Pin<Box<dyn AsyncRead + Send>>;
+pub type ReadStream<'a> = Pin<Box<dyn AsyncRead + Send + 'a>>;
 
 /// Helper function to collect a [`ReadStream`] into a byte vector.
-pub async fn read_to_vec(mut stream: ReadStream) -> io::Result<Vec<u8>> {
+pub async fn read_to_vec(mut stream: ReadStream<'_>) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf).await?;
     Ok(buf)

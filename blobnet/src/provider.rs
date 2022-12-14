@@ -54,9 +54,13 @@ pub trait Provider: Send + Sync {
     /// Equivalent to:
     ///
     /// ```ignore
-    /// async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error>;
+    /// async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream<'static>, Error>;
     /// ```
-    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error>;
+    async fn get(
+        &self,
+        hash: &str,
+        range: Option<(u64, u64)>,
+    ) -> Result<ReadStream<'static>, Error>;
 
     /// Adds a binary blob to storage, returning its hash.
     ///
@@ -66,9 +70,9 @@ pub trait Provider: Send + Sync {
     /// Equivalent to:
     ///
     /// ```ignore
-    /// async fn put(&self, data: ReadStream) -> Result<String, Error>;
+    /// async fn put(&self, data: ReadStream<'_>) -> Result<String, Error>;
     /// ```
-    async fn put(&self, data: ReadStream) -> Result<String, Error>;
+    async fn put(&self, data: ReadStream<'_>) -> Result<String, Error>;
 }
 
 /// A provider that stores blobs in memory, only used for testing.
@@ -92,7 +96,11 @@ impl Provider for Memory {
         Ok(bytes.len() as u64)
     }
 
-    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
+    async fn get(
+        &self,
+        hash: &str,
+        range: Option<(u64, u64)>,
+    ) -> Result<ReadStream<'static>, Error> {
         check_range(range)?;
         let data = self.data.read();
         let mut bytes = match data.get(hash) {
@@ -108,7 +116,7 @@ impl Provider for Memory {
         Ok(Box::pin(Cursor::new(bytes)))
     }
 
-    async fn put(&self, mut data: ReadStream) -> Result<String, Error> {
+    async fn put(&self, mut data: ReadStream<'_>) -> Result<String, Error> {
         let mut buf = Vec::new();
         data.read_to_end(&mut buf).await?;
         let hash = format!("{:x}", Sha256::new().chain_update(&buf).finalize());
@@ -162,7 +170,11 @@ impl Provider for S3 {
         }
     }
 
-    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
+    async fn get(
+        &self,
+        hash: &str,
+        range: Option<(u64, u64)>,
+    ) -> Result<ReadStream<'static>, Error> {
         check_range(range)?;
 
         if matches!(range, Some((s, e)) if s == e) {
@@ -199,7 +211,7 @@ impl Provider for S3 {
         }
     }
 
-    async fn put(&self, data: ReadStream) -> Result<String, Error> {
+    async fn put(&self, data: ReadStream<'_>) -> Result<String, Error> {
         let (hash, file) = make_data_tempfile(data).await?;
         let body = ByteStream::read_from()
             .file(file)
@@ -247,7 +259,11 @@ impl Provider for LocalDir {
         }
     }
 
-    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
+    async fn get(
+        &self,
+        hash: &str,
+        range: Option<(u64, u64)>,
+    ) -> Result<ReadStream<'static>, Error> {
         check_range(range)?;
         let key = hash_path(hash)?;
         let path = self.dir.join(key);
@@ -266,7 +282,7 @@ impl Provider for LocalDir {
         }
     }
 
-    async fn put(&self, data: ReadStream) -> Result<String, Error> {
+    async fn put(&self, data: ReadStream<'_>) -> Result<String, Error> {
         let (hash, file) = make_data_tempfile(data).await?;
         let file = file.into_std().await;
         let key = hash_path(&hash)?;
@@ -296,11 +312,15 @@ impl<C: Connect + Clone + Send + Sync + 'static> Provider for Remote<C> {
         self.client.head(hash).await
     }
 
-    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
+    async fn get(
+        &self,
+        hash: &str,
+        range: Option<(u64, u64)>,
+    ) -> Result<ReadStream<'static>, Error> {
         self.client.get(hash, range).await
     }
 
-    async fn put(&self, data: ReadStream) -> Result<String, Error> {
+    async fn put(&self, data: ReadStream<'_>) -> Result<String, Error> {
         let (_, file) = make_data_tempfile(data).await?;
         self.client
             .put(|| async { Ok(stream_body(Box::pin(file.try_clone().await?))) })
@@ -309,7 +329,7 @@ impl<C: Connect + Clone + Send + Sync + 'static> Provider for Remote<C> {
 }
 
 /// Stream data from a source into a temporary file and compute the hash.
-async fn make_data_tempfile(data: ReadStream) -> anyhow::Result<(String, File)> {
+async fn make_data_tempfile(data: ReadStream<'_>) -> anyhow::Result<(String, File)> {
     let mut file = File::from_std(task::spawn_blocking(tempfile).await??);
     let mut hash = Sha256::new();
     let mut reader = BufReader::new(data);
@@ -337,8 +357,8 @@ fn check_range(range: Option<(u64, u64)>) -> Result<(), Error> {
     }
 }
 
-fn empty_stream() -> ReadStream {
-    Box::pin(Cursor::new(Bytes::new()))
+fn empty_stream() -> ReadStream<'static> {
+    Box::pin(b"" as &[u8])
 }
 
 // A pair of providers is also a provider, acting as a fallback.
@@ -354,14 +374,18 @@ impl<P1: Provider, P2: Provider> Provider for (P1, P2) {
         }
     }
 
-    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
+    async fn get(
+        &self,
+        hash: &str,
+        range: Option<(u64, u64)>,
+    ) -> Result<ReadStream<'static>, Error> {
         match self.0.get(hash, range).await {
             Ok(res) => Ok(res),
             Err(_) => self.1.get(hash, range).await,
         }
     }
 
-    async fn put(&self, data: ReadStream) -> Result<String, Error> {
+    async fn put(&self, data: ReadStream<'_>) -> Result<String, Error> {
         self.0.put(data).await
     }
 }
@@ -559,7 +583,11 @@ impl<P: Provider + 'static> Provider for Cached<P> {
         self.state.get_cached_size(hash).await
     }
 
-    async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
+    async fn get(
+        &self,
+        hash: &str,
+        range: Option<(u64, u64)>,
+    ) -> Result<ReadStream<'static>, Error> {
         let (start, end) = range.unwrap_or((0, u64::MAX));
         check_range(range)?;
 
@@ -623,7 +651,7 @@ impl<P: Provider + 'static> Provider for Cached<P> {
         Ok(Box::pin(StreamReader::new(stream)))
     }
 
-    async fn put(&self, data: ReadStream) -> Result<String, Error> {
+    async fn put(&self, data: ReadStream<'_>) -> Result<String, Error> {
         self.state.inner.put(data).await
     }
 }

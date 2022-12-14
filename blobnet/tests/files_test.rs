@@ -27,7 +27,7 @@ async fn spawn_temp_server() -> Result<String> {
     Ok(format!("http://{addr}"))
 }
 
-async fn eat(mut stream: ReadStream) -> Result<String> {
+async fn eat(mut stream: ReadStream<'static>) -> Result<String> {
     let mut buf = String::new();
     stream.read_to_string(&mut buf).await?;
     Ok(buf)

@@ -102,7 +102,11 @@ impl<C: Connect + Clone + Send + Sync + 'static> FileClient<C> {
     }
 
     /// Read a range of bytes from a file.
-    pub async fn get(&self, hash: &str, range: Option<(u64, u64)>) -> Result<ReadStream, Error> {
+    pub async fn get(
+        &self,
+        hash: &str,
+        range: Option<(u64, u64)>,
+    ) -> Result<ReadStream<'static>, Error> {
         let make_req = || async {
             let mut req = Request::builder()
                 .method("GET")

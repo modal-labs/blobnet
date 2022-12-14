@@ -86,12 +86,12 @@ pub(crate) fn atomic_copy(mut source: impl Read, dest: impl AsRef<Path>) -> Resu
 }
 
 /// Convert a [`ReadStream`] object into an HTTP body.
-pub(crate) fn stream_body(stream: ReadStream) -> Body {
+pub(crate) fn stream_body(stream: ReadStream<'static>) -> Body {
     Body::wrap_stream(ReaderStream::new(stream))
 }
 
 /// Convert an HTTP body into a [`ReadStream`] object.
-pub(crate) fn body_stream(body: Body) -> ReadStream {
+pub(crate) fn body_stream(body: Body) -> ReadStream<'static> {
     Box::pin(StreamReader::new(StreamExt::map(body, |result| {
         result.map_err(|err| io::Error::new(io::ErrorKind::Other, err))
     })))
