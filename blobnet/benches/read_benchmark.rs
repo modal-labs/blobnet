@@ -1,4 +1,4 @@
-use std::{io::Cursor, time::Duration};
+use std::time::Duration;
 
 use blobnet::provider::{self, Provider};
 use criterion::{criterion_group, criterion_main, Criterion};
@@ -9,7 +9,7 @@ async fn insert_read(provider: impl Provider) -> anyhow::Result<()> {
     for i in 0..100 {
         let mut data = b"asdf".repeat(256);
         data.extend(u32::to_le_bytes(i));
-        let hash = provider.put(Box::pin(Cursor::new(data))).await?;
+        let hash = provider.put(Box::pin(&data[..])).await?;
         hashes.push(hash);
     }
     for _ in 0..100 {

@@ -25,7 +25,7 @@
 //! let provider = provider::Memory::new();
 //!
 //! // Insert data, returning its hash.
-//! let data: ReadStream = Box::pin(Cursor::new(b"hello blobnet world!"));
+//! let data: ReadStream = Box::pin(b"hello blobnet world!" as &[u8]);
 //! let hash = provider.put(data).await?;
 //!
 //! // Check if a blob exists and return its size.
